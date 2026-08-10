@@ -1,5 +1,5 @@
 import { TRPCError } from '@trpc/server';
-import { and, asc, desc, eq, isNull, ne, or } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, ne, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
@@ -371,7 +371,24 @@ export const e2eeRouter = router({
     }));
   }),
 
-  /** Lists a user's active (non-revoked) device IDs — needed to address a KeyPackage/Welcome request. Returns IDs only, no other device metadata. */
+  /**
+   * Lists a user's active AND E2EE-ready device IDs — needed to address a
+   * KeyPackage/Welcome request. Returns IDs only, no other device metadata.
+   *
+   * Bug fix: this previously filtered only on `revokedAt IS NULL`, so a
+   * device that exists (created at login/register) but never finished
+   * `registerDeviceCredential` — because its `ensureE2eeSetup` is still
+   * in flight, failed, or (on web, where the native MLS module is
+   * unavailable) can never run — was still reported as an addressable
+   * target. `consumeKeyPackage` would then correctly find no KeyPackage
+   * for it, and if that happened to be the caller's only candidate
+   * device, `startConversation` failed with "isn't ready to receive
+   * encrypted messages yet" even when the recipient had a genuinely
+   * ready device that just wasn't the one considered. Requiring
+   * `mlsCredentialPublicKey IS NOT NULL` here restricts this list to
+   * devices that have actually completed credential registration, which
+   * is the real precondition for being a valid KeyPackage/Welcome target.
+   */
   listActiveDeviceIds: protectedProcedure.input(z.object({ userId: z.string().uuid() })).query(async ({ ctx, input }) => {
     // Read-only, but this is a per-user device-enumeration primitive —
     // bounded generously enough for legitimate group-membership checks
@@ -382,7 +399,7 @@ export const e2eeRouter = router({
     const rows = await ctx.db
       .select({ id: devices.id })
       .from(devices)
-      .where(and(eq(devices.userId, input.userId), isNull(devices.revokedAt)));
+      .where(and(eq(devices.userId, input.userId), isNull(devices.revokedAt), isNotNull(devices.mlsCredentialPublicKey)));
     return rows.map((r) => r.id);
   }),
 });
