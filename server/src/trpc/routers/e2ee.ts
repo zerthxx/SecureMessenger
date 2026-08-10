@@ -1,5 +1,5 @@
 import { TRPCError } from '@trpc/server';
-import { and, asc, desc, eq, isNotNull, isNull, ne, or } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
@@ -190,37 +190,60 @@ export const e2eeRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Cannot create a conversation with yourself.' });
       }
 
-      const otherMembers = alias(conversationMembers, 'other_members_cc');
-      const [existing] = await ctx.db
-        .select({ conversationId: conversations.id })
-        .from(conversationMembers)
-        .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
-        .innerJoin(
-          otherMembers,
-          and(eq(otherMembers.conversationId, conversationMembers.conversationId), eq(otherMembers.userId, input.otherUserId)),
-        )
-        .where(and(eq(conversationMembers.userId, ctx.user.id), eq(conversations.type, 'direct')))
-        .limit(1);
+      // Two concurrent calls for the same pair (double tap, a client
+      // retrying a request it thinks failed, two devices of the same
+      // account, or the other member starting the conversation from
+      // their side at the same moment) previously raced the "check for
+      // an existing direct conversation, else insert one" logic below:
+      // both could read "none exists" before either had committed its
+      // insert, producing two separate `conversations` rows for the same
+      // pair. There's no schema-level uniqueness constraint on a
+      // direct-conversation member pair (only conversation_members'
+      // (conversation_id, user_id) primary key, which doesn't help
+      // here), so the fix is to serialize this whole check-then-insert
+      // per pair instead.
+      //
+      // pg_advisory_xact_lock is transaction-scoped — it auto-releases on
+      // commit/rollback/connection loss, needs no manual unlock, and
+      // costs nothing when uncontended. Keying it off the *sorted* pair
+      // means both members' calls (or two devices of either) contend for
+      // the exact same lock regardless of who calls first.
+      return ctx.db.transaction(async (tx) => {
+        const [a, b] = [ctx.user.id, input.otherUserId].sort();
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${a} || ':' || ${b}))`);
 
-      if (existing) {
-        return { conversationId: existing.conversationId };
-      }
+        const otherMembers = alias(conversationMembers, 'other_members_cc');
+        const [existing] = await tx
+          .select({ conversationId: conversations.id })
+          .from(conversationMembers)
+          .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+          .innerJoin(
+            otherMembers,
+            and(eq(otherMembers.conversationId, conversationMembers.conversationId), eq(otherMembers.userId, input.otherUserId)),
+          )
+          .where(and(eq(conversationMembers.userId, ctx.user.id), eq(conversations.type, 'direct')))
+          .limit(1);
 
-      const [conversation] = await ctx.db
-        .insert(conversations)
-        .values({ type: 'direct' })
-        .returning({ id: conversations.id });
+        if (existing) {
+          return { conversationId: existing.conversationId };
+        }
 
-      if (!conversation) {
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create conversation.' });
-      }
+        const [conversation] = await tx
+          .insert(conversations)
+          .values({ type: 'direct' })
+          .returning({ id: conversations.id });
 
-      await ctx.db.insert(conversationMembers).values([
-        { conversationId: conversation.id, userId: ctx.user.id },
-        { conversationId: conversation.id, userId: input.otherUserId },
-      ]);
+        if (!conversation) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create conversation.' });
+        }
 
-      return { conversationId: conversation.id };
+        await tx.insert(conversationMembers).values([
+          { conversationId: conversation.id, userId: ctx.user.id },
+          { conversationId: conversation.id, userId: input.otherUserId },
+        ]);
+
+        return { conversationId: conversation.id };
+      });
     }),
 
   /**
