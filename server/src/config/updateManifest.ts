@@ -31,19 +31,18 @@ export interface UpdateManifest {
   mandatory: boolean;
 }
 
-// v0.2.0 — the first release published through this update system.
-// apkUrl/sha256 point at the actual signed release APK uploaded to
-// GitHub Releases (zerthxx/SecureMessenger, tag v0.2.0); sha256 was
+// v0.3.0 — apkUrl/sha256 point at the actual signed release APK uploaded
+// to GitHub Releases (zerthxx/SecureMessenger, tag v0.3.0); sha256 was
 // computed locally from the same APK before upload and independently
-// confirmed to match both GitHub's own reported asset digest and a
-// fresh re-download's hash. Update this whole object (and bump
-// versionCode) the next time a signed release APK is cut and uploaded.
+// confirmed to match GitHub's own reported asset digest. Update this
+// whole object (and bump versionCode) the next time a signed release
+// APK is cut and uploaded.
 export const CURRENT_UPDATE_MANIFEST: UpdateManifest = {
-  versionName: '0.2.0',
-  versionCode: 2,
-  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.2.0/app-release.apk',
-  sha256: '2900c487f5fbad5be850c3a94262bcb463c763f47c12d4470936bf02ba63d4ef',
+  versionName: '0.3.0',
+  versionCode: 3,
+  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.3.0/app-release.apk',
+  sha256: '47b7363f2346da0963ac786618aad3e84296f5692c3e2125d6388dab4a08a74e',
   releaseNotes:
-    'Fixes account-data isolation on logout/login, preserves encrypted messages across logout/login, prevents duplicate direct conversations, fixes a chat-list navigation race, and adds this in-app update system.',
+    'Fixes intermittent "Failed to send" messages: the client now transparently refreshes and retries once when the access token expires mid-session instead of surfacing a 401 as a send failure.',
   mandatory: false,
 };
