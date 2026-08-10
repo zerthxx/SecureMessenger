@@ -1,0 +1,80 @@
+[package]
+name = "mls-core"
+version = "0.1.0"
+edition = "2021"
+# Internal crate — not published. Provides the E2EE crypto foundation
+# (identity/device keys, KeyPackage generation, encrypted local storage)
+# for the mobile app via UniFFI-generated Kotlin/Swift bindings.
+publish = false
+
+[lib]
+# cdylib: loaded as a native .so/.dylib by Kotlin/Swift via UniFFI.
+# staticlib: not currently used, kept off to reduce build surface.
+# lib: needed so `cargo test` can run the crate's own Rust unit tests directly.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Dev-only tool to generate Kotlin/Swift bindings from the compiled
+# library (`cargo run --bin uniffi-bindgen -- generate ...`). Gated
+# behind the "cli" feature so the mobile-shipped cdylib build doesn't
+# pull in UniFFI's CLI/codegen dependencies.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["uniffi/cli"]
+
+[[bin]]
+# Phase 5C consolidated proof driver — see src/bin/proof.rs doc comment
+# and the Phase 5C report for how this is used to drive a real
+# device -> server -> device round trip via curl. Dev-only, not shipped.
+name = "proof"
+path = "src/bin/proof.rs"
+
+[dependencies]
+# Pinned to the exact version confirmed (Phase 5B pre-check) to include
+# the fix for the SRLabs-audit High-severity finding (fixed in 8.1/7.3).
+# Do not bump without re-checking the audit/changelog first.
+# NOTE: the sibling crates below do NOT share openmls's 0.8.x version
+# number — openmls 0.8.1's own published dependency list (checked via
+# crates.io) pins openmls_traits ^0.5.0, openmls_basic_credential ^0.5.0,
+# openmls_rust_crypto ^0.5.1. Versioned separately by upstream; matched
+# here to what 0.8.1 actually resolves to, not to 0.8.1 itself.
+openmls = { version = "=0.8.1", features = ["sqlite-provider"] }
+openmls_rust_crypto = "0.5.1"
+openmls_basic_credential = { version = "0.5", features = ["clonable"] }
+openmls_traits = "0.5"
+# Official OpenMLS-maintained persistent group-state storage backend —
+# Phase 5C uses this instead of hand-implementing StorageProvider's ~54
+# methods (see rust/src/group_storage.rs doc comment for why).
+openmls_sqlite_storage = "0.2"
+# Phase 5D: explicit direct dependency (same 0.32 release
+# openmls_sqlite_storage already pulls in via Cargo feature unification)
+# purely to turn on rusqlite's "backup" feature — the stock SQLite online
+# backup API, used to snapshot/restore the in-memory group database to an
+# encrypted blob (see group_storage.rs). Purely additive: "backup" has no
+# relationship to, and does not conflict with, the "bundled" feature
+# openmls_sqlite_storage requests (confirmed against rusqlite's feature
+# list before adding this — no SQLCipher/"bundled" conflict here, unlike
+# full page-level SQLCipher encryption, which was considered and rejected
+# for this phase because it would require forking openmls_sqlite_storage's
+# own manifest; see the Phase 5D report).
+rusqlite = { version = "0.32", features = ["backup"] }
+tls_codec = "0.4"
+
+uniffi = { version = "0.32", features = ["build"] }
+
+# Local-storage-at-rest encryption: standard, audited AEAD primitive
+# (RustCrypto project), not a custom/invented construction. See
+# storage.rs doc comment for exactly what this encrypts and why.
+aes-gcm = "0.10"
+rand = "0.8"
+
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+thiserror = "2"
+zeroize = "1.8"
+# Only used by the proof.rs dev/verification binary (base64 <-> bytes at
+# a CLI boundary) — not a cryptographic primitive.
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

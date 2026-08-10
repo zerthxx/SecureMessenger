@@ -1,0 +1,34 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.mlscore'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.mlscore"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+    // Matches the targets the Rust crate is cross-compiled for via
+    // `cargo ndk` (see rust/README or the Phase 5B report for the exact
+    // command) — arm64-v8a for real devices, x86_64 for the Android
+    // emulator used in this project's dev/verification workflow.
+    ndk {
+      abiFilters "arm64-v8a", "x86_64"
+    }
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // Required by UniFFI-generated Kotlin bindings for native struct
+  // marshaling (RustBuffer/ForeignBytes) — not optional, per UniFFI's
+  // own Kotlin consumer docs. @aar classifier required on Android.
+  implementation "net.java.dev.jna:jna:5.12.0@aar"
+  // Required by UniFFI's async/future support in generated bindings.
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
+}

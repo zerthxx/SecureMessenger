@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["MlsCoreModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.mlscore.MlsCoreModule"]
+  }
+}
