@@ -5,6 +5,7 @@ import fastify from 'fastify';
 
 import { env } from './config/env.js';
 import { healthRoutes } from './http/health.js';
+import { updateManifestRoutes } from './http/updateManifest.js';
 import { loggerOptions } from './lib/logger.js';
 import { createContext } from './trpc/context.js';
 import { appRouter, type AppRouter } from './trpc/router.js';
@@ -19,6 +20,7 @@ export function buildApp() {
   app.register(cors, { origin: env.CORS_ORIGIN });
 
   app.register(healthRoutes);
+  app.register(updateManifestRoutes);
 
   app.register(fastifyTRPCPlugin, {
     prefix: '/trpc',
