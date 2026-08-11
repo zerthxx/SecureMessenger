@@ -18,7 +18,36 @@ export default function HomeLayout(): React.JSX.Element {
   return (
     <Tabs screenOptions={{ headerShown: false }} tabBar={(props) => <BottomNav {...props} />}>
       <Tabs.Screen name="index" options={{ title: 'Home', tabBarIcon: tabIcon('home-outline', 'home') }} />
-      <Tabs.Screen name="chats" options={{ title: 'Chats', tabBarIcon: tabIcon('chatbubble-outline', 'chatbubble') }} />
+      <Tabs.Screen
+        name="chats"
+        options={{ title: 'Chats', tabBarIcon: tabIcon('chatbubble-outline', 'chatbubble') }}
+        listeners={({ navigation }) => ({
+          // Without this, switching away from the Chats tab while inside
+          // a conversation (chats/[id]) and back preserves that nested
+          // stack's position by default — the bottom "Chats" tab would
+          // silently reopen whatever conversation was last viewed instead
+          // of the conversation list.
+          //
+          // `e.preventDefault()` is required, not optional: without it,
+          // React Navigation's own default tab-press handling (which
+          // restores this tab's last-visited screen) races the explicit
+          // `navigate` call below. On-device testing showed the explicit
+          // call alone works when re-pressing "Chats" while already on
+          // it, but NOT when switching to it from a different tab
+          // (Home → Chats) — the default restore-last-position behavior
+          // won that race and reopened the conversation anyway.
+          // Preventing the default first makes this the only navigation
+          // that happens, for both cases. (An even earlier attempt used
+          // the built-in `popToTopOnBlur` screen option instead —
+          // confirmed via on-device testing to silently break ALL
+          // navigation into this tab, not just fix the reported issue;
+          // reverted.)
+          tabPress: (e) => {
+            e.preventDefault();
+            navigation.navigate('chats', { screen: 'index' });
+          },
+        })}
+      />
       <Tabs.Screen name="stories" options={{ title: 'Stories', tabBarIcon: tabIcon('sparkles-outline', 'sparkles') }} />
       <Tabs.Screen name="groups" options={{ title: 'Groups', tabBarIcon: tabIcon('people-outline', 'people') }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: tabIcon('person-outline', 'person') }} />

@@ -5,7 +5,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ThemeProvider, useTheme } from '@/ui/theme';
-import { AuthProvider, ChatProvider } from '@/ui/screens';
+import { AuthProvider, ChatProvider, UpdateDialog, UpdateIndicator, UpdateProvider } from '@/ui/screens';
 
 function ThemedStatusBar(): React.JSX.Element {
   const theme = useTheme();
@@ -37,7 +37,11 @@ export default function RootLayout(): React.JSX.Element {
         <ThemeProvider>
           <AuthProvider>
             <ChatProvider>
-              <RootNavigator />
+              <UpdateProvider>
+                <RootNavigator />
+                <UpdateIndicator />
+                <UpdateDialog />
+              </UpdateProvider>
             </ChatProvider>
           </AuthProvider>
         </ThemeProvider>

@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    Required to launch Android's own package installer UI for a
+    content:// URI pointing at a downloaded APK (PackageInstaller /
+    Intent.ACTION_VIEW with MIME type application/vnd.android.package-archive).
+    This does NOT grant silent/unattended install capability — Android
+    still always shows its own Install/Update confirmation dialog and the
+    user must tap Install themselves; this permission only lets the app
+    present that system dialog instead of being blocked from doing so.
+    Required on API 26+ (Android 8 "Unknown sources" per-app model).
+  -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+</manifest>

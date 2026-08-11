@@ -14,11 +14,33 @@ import { createTRPCUntypedClient, httpBatchLink, TRPCClientError } from '@trpc/c
 // still shows up here as a type error instead of silently drifting.
 import type { AppRouter, RouterInputs, RouterOutputs } from '../../../server/src/trpc/router';
 
-// 10.0.2.2 is the Android emulator's alias for the host machine's
-// localhost — plain "localhost" would resolve to the emulator itself.
-// Override with EXPO_PUBLIC_API_URL (Expo inlines EXPO_PUBLIC_* at
-// build time, no extra config needed) once there's a real deployment.
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:4000';
+/**
+ * 10.0.2.2 is the Android emulator's alias for the host machine's
+ * localhost — plain "localhost" would resolve to the emulator itself.
+ * Override with EXPO_PUBLIC_API_URL (Expo inlines EXPO_PUBLIC_* at build
+ * time, no extra config needed) to point at a real deployment.
+ *
+ * The emulator-only fallback is gated behind `__DEV__` rather than a
+ * plain `?? 'http://10.0.2.2:4000'` so a release build that's ever cut
+ * without EXPO_PUBLIC_API_URL set fails loudly at launch instead of
+ * silently shipping pointed at a dev-only address — `if (__DEV__)` is
+ * the standard RN/Metro dead-code-elimination guard (like React's own
+ * dev-only warnings), so this branch and its string literal are
+ * provably stripped from a release bundle, unlike a generic `??`
+ * fallback a minifier isn't guaranteed to fold away.
+ */
+function resolveApiBaseUrl(): string {
+  if (process.env.EXPO_PUBLIC_API_URL) return process.env.EXPO_PUBLIC_API_URL;
+  if (__DEV__) return 'http://10.0.2.2:4000';
+  throw new Error('EXPO_PUBLIC_API_URL must be set for a release build.');
+}
+
+// Exported so other trusted-host consumers (e.g. the update-manifest
+// fetch in src/infrastructure/update) derive the same production host
+// this client itself talks to, rather than re-reading the env var and
+// risking a second, possibly-inconsistent source of truth for "which
+// server is trusted."
+export const API_BASE_URL = resolveApiBaseUrl();
 
 let currentAccessToken: string | null = null;
 
@@ -40,6 +62,65 @@ type Inputs = RouterInputs;
 type Outputs = RouterOutputs;
 
 /**
+ * The access token is short-lived (15 minutes — see the server's
+ * ACCESS_TOKEN_TTL_SECONDS) and nothing here refreshes it proactively.
+ * Before this wrapper existed, every wrapper function below called
+ * `untypedClient` directly: the first authenticated call made after the
+ * token expired got a 401 UNAUTHORIZED from the server's
+ * `protectedProcedure` middleware, and — because nothing caught that
+ * specific error and retried — every later call in the same app session
+ * kept 401ing the same way forever (confirmed via a live repro: a
+ * message send that failed this way, followed by a poll cycle whose
+ * fetchMessages call 401ed too). A `sendMessage` failing this way looks
+ * identical to a real network failure in the UI ("Failed to send"), but
+ * it is neither a lost response nor a dropped connection — the server
+ * never saw a valid request to act on.
+ *
+ * AuthContext registers `authRefreshHandler` with the same
+ * refresh-token exchange it already runs at app bootstrap, so a token
+ * that expires *mid-session* is refreshed the same way one that's
+ * already expired at launch is. Concurrent 401s (e.g. several messages
+ * in flight at once) share one in-flight refresh via `refreshInFlight`
+ * — never more than one refresh-token exchange at a time, for the same
+ * "refresh tokens rotate on every use" reason AuthContext's own
+ * bootstrap guard exists (see its doc comment).
+ */
+type AuthRefreshHandler = () => Promise<void>;
+let authRefreshHandler: AuthRefreshHandler | null = null;
+let refreshInFlight: Promise<void> | null = null;
+
+/** Called by AuthContext once it mounts (and cleared on unmount/logout). */
+export function setAuthRefreshHandler(handler: AuthRefreshHandler | null): void {
+  authRefreshHandler = handler;
+}
+
+function isUnauthorized(err: unknown): boolean {
+  return err instanceof TRPCClientError && (err.data as { code?: string } | null)?.code === 'UNAUTHORIZED';
+}
+
+/**
+ * Runs `call` once; on a 401, refreshes the access token (deduped
+ * against any other 401 already refreshing) and retries `call` exactly
+ * once more. A retry that still 401s (e.g. the refresh token itself is
+ * no longer valid — a genuinely signed-out session) propagates that
+ * second error rather than looping.
+ */
+async function withAuthRetry<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    if (!isUnauthorized(err) || !authRefreshHandler) throw err;
+    if (!refreshInFlight) {
+      refreshInFlight = authRefreshHandler().finally(() => {
+        refreshInFlight = null;
+      });
+    }
+    await refreshInFlight;
+    return call();
+  }
+}
+
+/**
  * Hand-written, explicitly-typed wrapper around the untyped client — one
  * function per auth procedure, each pinned to the server's real
  * input/output types. This is the boundary described above: everything
@@ -59,13 +140,13 @@ export const authApi = {
   refresh: (input: Inputs['auth']['refresh']) =>
     untypedClient.mutation('auth.refresh', input) as Promise<Outputs['auth']['refresh']>,
 
-  logout: () => untypedClient.mutation('auth.logout') as Promise<Outputs['auth']['logout']>,
+  logout: () => withAuthRetry(() => untypedClient.mutation('auth.logout')) as Promise<Outputs['auth']['logout']>,
 
   logoutAllDevices: () =>
-    untypedClient.mutation('auth.logoutAllDevices') as Promise<Outputs['auth']['logoutAllDevices']>,
+    withAuthRetry(() => untypedClient.mutation('auth.logoutAllDevices')) as Promise<Outputs['auth']['logoutAllDevices']>,
 
   changePassword: (input: Inputs['auth']['changePassword']) =>
-    untypedClient.mutation('auth.changePassword', input) as Promise<Outputs['auth']['changePassword']>,
+    withAuthRetry(() => untypedClient.mutation('auth.changePassword', input)) as Promise<Outputs['auth']['changePassword']>,
 
   recovery: {
     verifyCode: (input: Inputs['auth']['recovery']['verifyCode']) =>
@@ -78,41 +159,59 @@ export const authApi = {
   },
 };
 
-/** Same pattern as `authApi` — see the note at the top of this file for why it's hand-written instead of a typed proxy. */
+/**
+ * Same pattern as `authApi` — see the note at the top of this file for
+ * why it's hand-written instead of a typed proxy. Every one of these
+ * procedures is a `protectedProcedure` (requires a valid access token),
+ * so every call goes through `withAuthRetry` — see that function's doc
+ * comment for why: without it, a `sendMessage` (or any other call here)
+ * made after the access token's 15-minute TTL elapses fails with a
+ * silent 401 that the UI can only show as a generic send/load failure.
+ */
 export const e2eeApi = {
   registerIdentityKey: (input: Inputs['e2ee']['registerIdentityKey']) =>
-    untypedClient.mutation('e2ee.registerIdentityKey', input) as Promise<Outputs['e2ee']['registerIdentityKey']>,
+    withAuthRetry(() => untypedClient.mutation('e2ee.registerIdentityKey', input)) as Promise<
+      Outputs['e2ee']['registerIdentityKey']
+    >,
 
   registerDeviceCredential: (input: Inputs['e2ee']['registerDeviceCredential']) =>
-    untypedClient.mutation('e2ee.registerDeviceCredential', input) as Promise<
+    withAuthRetry(() => untypedClient.mutation('e2ee.registerDeviceCredential', input)) as Promise<
       Outputs['e2ee']['registerDeviceCredential']
     >,
 
   publishKeyPackages: (input: Inputs['e2ee']['publishKeyPackages']) =>
-    untypedClient.mutation('e2ee.publishKeyPackages', input) as Promise<Outputs['e2ee']['publishKeyPackages']>,
+    withAuthRetry(() => untypedClient.mutation('e2ee.publishKeyPackages', input)) as Promise<
+      Outputs['e2ee']['publishKeyPackages']
+    >,
 
   consumeKeyPackage: (input: Inputs['e2ee']['consumeKeyPackage']) =>
-    untypedClient.mutation('e2ee.consumeKeyPackage', input) as Promise<Outputs['e2ee']['consumeKeyPackage']>,
+    withAuthRetry(() => untypedClient.mutation('e2ee.consumeKeyPackage', input)) as Promise<
+      Outputs['e2ee']['consumeKeyPackage']
+    >,
 
   createConversation: (input: Inputs['e2ee']['createConversation']) =>
-    untypedClient.mutation('e2ee.createConversation', input) as Promise<Outputs['e2ee']['createConversation']>,
+    withAuthRetry(() => untypedClient.mutation('e2ee.createConversation', input)) as Promise<
+      Outputs['e2ee']['createConversation']
+    >,
 
   listConversations: () =>
-    untypedClient.query('e2ee.listConversations') as Promise<Outputs['e2ee']['listConversations']>,
+    withAuthRetry(() => untypedClient.query('e2ee.listConversations')) as Promise<Outputs['e2ee']['listConversations']>,
 
   sendMessage: (input: Inputs['e2ee']['sendMessage']) =>
-    untypedClient.mutation('e2ee.sendMessage', input) as Promise<Outputs['e2ee']['sendMessage']>,
+    withAuthRetry(() => untypedClient.mutation('e2ee.sendMessage', input)) as Promise<Outputs['e2ee']['sendMessage']>,
 
   fetchMessages: (input: Inputs['e2ee']['fetchMessages']) =>
-    untypedClient.query('e2ee.fetchMessages', input) as Promise<Outputs['e2ee']['fetchMessages']>,
+    withAuthRetry(() => untypedClient.query('e2ee.fetchMessages', input)) as Promise<Outputs['e2ee']['fetchMessages']>,
 
   listActiveDeviceIds: (input: Inputs['e2ee']['listActiveDeviceIds']) =>
-    untypedClient.query('e2ee.listActiveDeviceIds', input) as Promise<Outputs['e2ee']['listActiveDeviceIds']>,
+    withAuthRetry(() => untypedClient.query('e2ee.listActiveDeviceIds', input)) as Promise<
+      Outputs['e2ee']['listActiveDeviceIds']
+    >,
 };
 
 export const usersApi = {
   search: (input: Inputs['users']['search']) =>
-    untypedClient.query('users.search', input) as Promise<Outputs['users']['search']>,
+    withAuthRetry(() => untypedClient.query('users.search', input)) as Promise<Outputs['users']['search']>,
 };
 
 /** Turns a tRPC error, or a plain Error thrown by local orchestration code, into a message safe to show directly in the UI. */

@@ -8,3 +8,4 @@ export { ProfileScreen } from './ProfileScreen';
 export { SettingsScreen } from './SettingsScreen';
 export * from './auth';
 export * from './chat';
+export * from './update';

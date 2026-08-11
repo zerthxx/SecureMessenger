@@ -1,8 +1,8 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 
 import type { AuthUser } from '@/domain/entities';
 import { getDeviceInfo } from '@/infrastructure/network/deviceInfo';
-import { authApi, getApiErrorMessage, setAccessToken } from '@/infrastructure/network/trpcClient';
+import { authApi, getApiErrorMessage, setAccessToken, setAuthRefreshHandler } from '@/infrastructure/network/trpcClient';
 import { clearSession, loadSession, saveSession, type StoredSession } from '@/infrastructure/storage/secureAuthStorage';
 
 type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
@@ -55,12 +55,14 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<AuthUser | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
-  // Mirrors state into a ref so callbacks below don't need `session` in
-  // their dependency arrays while still reading the latest value.
+  // Mirrors state into refs so callbacks below don't need `session`/`user`
+  // in their dependency arrays while still reading the latest value.
   const sessionRef = useRef<Session | null>(null);
+  const userRef = useRef<AuthUser | null>(null);
 
   function applySession(nextUser: AuthUser, nextSession: Session) {
     sessionRef.current = nextSession;
+    userRef.current = nextUser;
     setAccessToken(nextSession.accessToken);
     setUser(nextUser);
     setDeviceId(nextSession.deviceId);
@@ -69,10 +71,17 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
 
   async function clearAuth() {
     sessionRef.current = null;
+    userRef.current = null;
     setAccessToken(null);
     setUser(null);
     setDeviceId(null);
     setStatus('unauthenticated');
+    // Session/auth material only. Local conversation/message data is NOT
+    // cleared here — it's owner-scoped per account in messageStore (see
+    // ChatContext, which points the store at whichever account is
+    // currently authenticated) rather than deleted on logout, so a
+    // signed-out account's encrypted messages are still there, still
+    // decryptable, the next time that same account signs back in.
     await clearSession();
   }
 
@@ -110,6 +119,43 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
     // reactive effect over changing state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Exchanges the current refresh token for a new access token — the
+   * exact same operation the bootstrap effect above runs at app launch,
+   * reused here as the handler trpcClient calls the moment any
+   * `protectedProcedure` call 401s mid-session (see
+   * `withAuthRetry`/`setAuthRefreshHandler` in trpcClient.ts for why
+   * that's necessary: the access token's 15-minute TTL routinely
+   * outlives a real chat session, and nothing else in the app renews it
+   * before then). Reads `sessionRef`/`userRef` rather than `session`/
+   * `user` state so trpcClient always calls the *current* handler
+   * closure's up-to-date session, not one captured from whenever this
+   * effect last ran.
+   *
+   * Throws (rather than calling `clearAuth`) when there's no session to
+   * refresh or the refresh token itself is no longer valid — the caller
+   * (`withAuthRetry`) already has its own single retry of the original
+   * call, which will surface a normal 401 to whatever screen triggered
+   * it. Forcing a full sign-out from deep inside a background retry
+   * would be a much bigger behavior change than this fix calls for.
+   */
+  const performRefresh = useCallback(async (): Promise<void> => {
+    const current = sessionRef.current;
+    const currentUser = userRef.current;
+    if (!current || !currentUser) {
+      throw new Error('Not signed in');
+    }
+    const result = await authApi.refresh({ refreshToken: current.refreshToken });
+    const nextSession: Session = { ...result.session, deviceId: current.deviceId };
+    await saveSession(toStoredSession(currentUser, nextSession));
+    applySession(currentUser, nextSession);
+  }, []);
+
+  useEffect(() => {
+    setAuthRefreshHandler(performRefresh);
+    return () => setAuthRefreshHandler(null);
+  }, [performRefresh]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
