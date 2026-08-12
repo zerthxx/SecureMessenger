@@ -31,18 +31,20 @@ export interface UpdateManifest {
   mandatory: boolean;
 }
 
-// v0.4.0 — apkUrl/sha256 point at the actual signed release APK uploaded
-// to GitHub Releases (zerthxx/SecureMessenger, tag v0.4.0); sha256 was
+// v0.5.0 — apkUrl/sha256 point at the actual signed release APK uploaded
+// to GitHub Releases (zerthxx/SecureMessenger, tag v0.5.0); sha256 was
 // computed locally from the same APK before upload and independently
-// confirmed to match the re-downloaded asset's own digest. Update this
-// whole object (and bump versionCode) the next time a signed release
-// APK is cut and uploaded.
+// confirmed to match the re-downloaded asset's own digest. Signed with a
+// NEW production keystore (the original was confirmed unrecoverable) —
+// see keystores/KEYSTORE_INFO.md — so this is not an in-place update for
+// devices with a pre-v0.5.0 production APK installed; those installs
+// must uninstall and reinstall fresh. Update this whole object (and bump
+// versionCode) the next time a signed release APK is cut and uploaded.
 export const CURRENT_UPDATE_MANIFEST: UpdateManifest = {
-  versionName: '0.4.0',
-  versionCode: 4,
-  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.4.0/app-release.apk',
-  sha256: 'a5ce9f30cb7053b1add4bfddf5f0cf7bdc1082cfc2886380829a995797592986',
-  releaseNotes:
-    'Fixes the update prompt disappearing for good after "Later" — a pending update now stays reachable via a small indicator until it\'s actually installed. Also fixes the install-permission screen getting stuck with no way to retry after granting the permission.',
+  versionName: '0.5.0',
+  versionCode: 5,
+  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.5.0/app-release.apk',
+  sha256: '7f147e284c0676aeb3cb3e038ec86c05626eaadcaf6607b2cc793009c8d10f3b',
+  releaseNotes: 'Various fixes and improvements under the hood.',
   mandatory: false,
 };
