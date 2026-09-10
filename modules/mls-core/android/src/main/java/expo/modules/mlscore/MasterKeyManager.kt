@@ -5,12 +5,47 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.util.Log
 import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
+
+// TEMPORARY diagnostic instrumentation — added to trace the exact
+// Honor-device-only "StorageNotInitialized" failure reported after the
+// ensureE2eeSetup reentrancy fix did not resolve it there (the emulator,
+// which has no real StrongBox hardware, does not reproduce this). Never
+// logs key bytes or any derived secret material — only booleans, file
+// existence, exception types, and a non-reversible Arrays.hashCode()
+// checksum of the master key (to detect "this call returned a DIFFERENT
+// key than expected" without ever exposing the key itself). Remove once
+// the root cause is confirmed from real device logcat output.
+//
+// Audit fix: this previously logged unconditionally, including in
+// release builds — a checksum of the literal master key plus the app's
+// private filesDir path and device manufacturer/model landing in logcat
+// on every real user's device, readable via `adb logcat` (USB
+// debugging) or by any app holding READ_LOGS on affected OEMs. Gated
+// behind FLAG_DEBUGGABLE (false for any release-signed build) so it
+// keeps working for on-device Honor debugging but can never ship.
+private const val DIAG_TAG = "MlsCoreDiag"
+
+private fun isDebugBuild(context: Context): Boolean =
+    (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+private fun diagLog(context: Context, message: String) {
+    if (isDebugBuild(context)) Log.d(DIAG_TAG, message)
+}
+
+private fun diagWarn(context: Context, message: String) {
+    if (isDebugBuild(context)) Log.w(DIAG_TAG, message)
+}
+
+private fun diagLogError(context: Context, message: String) {
+    if (isDebugBuild(context)) Log.e(DIAG_TAG, message)
+}
 
 /**
  * Envelope encryption for the 32-byte master key mls-core uses to
@@ -56,27 +91,43 @@ internal object MasterKeyManager {
     fun getOrCreateMasterKey(context: Context, namespace: String): ByteArray {
         val file = File(context.filesDir, "$WRAPPED_FILE_NAME.$namespace")
         val alias = "$KEYSTORE_ALIAS.$namespace"
+        diagLog(
+            context,
+            "getOrCreateMasterKey-start namespace=$namespace filesDir=${context.filesDir.absolutePath} " +
+                "wrappedFile=${file.absolutePath} wrappedFileExists=${file.exists()} wrappedFileLength=${if (file.exists()) file.length() else -1}",
+        )
 
         if (file.exists()) {
-            val wrappingKey = getOrCreateWrappingKey(alias)
-            return unwrap(wrappingKey, file.readBytes())
+            val wrappingKey = getOrCreateWrappingKey(context, alias)
+            val result = try {
+                unwrap(wrappingKey, file.readBytes())
+            } catch (e: Exception) {
+                diagLogError(context, "getOrCreateMasterKey unwrap-failure namespace=$namespace exceptionType=${e::class.qualifiedName} message=${e.message}")
+                throw e
+            }
+            diagLog(context, "getOrCreateMasterKey unwrap-success namespace=$namespace masterKeyLen=${result.size} masterKeyChecksum=${result.contentHashCode()}")
+            return result
         }
 
         val oldFile = File(context.filesDir, WRAPPED_FILE_NAME)
         val oldWrappingKey = if (oldFile.exists()) getWrappingKeyIfExists(KEYSTORE_ALIAS) else null
         if (oldWrappingKey != null) {
+            diagLog(context, "getOrCreateMasterKey migrating-old-key namespace=$namespace")
             val masterKey = unwrap(oldWrappingKey, oldFile.readBytes())
-            val wrappingKey = getOrCreateWrappingKey(alias)
+            val wrappingKey = getOrCreateWrappingKey(context, alias)
             file.writeBytes(wrap(wrappingKey, masterKey))
             oldFile.delete()
+            diagLog(context, "getOrCreateMasterKey migration-complete namespace=$namespace masterKeyChecksum=${masterKey.contentHashCode()}")
             return masterKey
         }
 
+        diagLog(context, "getOrCreateMasterKey generating-fresh-key namespace=$namespace (no wrapped file found for this namespace or the legacy pre-namespaced one)")
         val masterKey = ByteArray(MASTER_KEY_LENGTH_BYTES)
         SecureRandom().nextBytes(masterKey)
 
-        val wrappingKey = getOrCreateWrappingKey(alias)
+        val wrappingKey = getOrCreateWrappingKey(context, alias)
         file.writeBytes(wrap(wrappingKey, masterKey))
+        diagLog(context, "getOrCreateMasterKey fresh-key-persisted namespace=$namespace masterKeyChecksum=${masterKey.contentHashCode()} wroteBytes=${file.length()}")
         return masterKey
     }
 
@@ -86,15 +137,19 @@ internal object MasterKeyManager {
         return keyStore.getKey(alias, null) as? javax.crypto.SecretKey
     }
 
-    private fun getOrCreateWrappingKey(alias: String): javax.crypto.SecretKey {
-        getWrappingKeyIfExists(alias)?.let { return it }
+    private fun getOrCreateWrappingKey(context: Context, alias: String): javax.crypto.SecretKey {
+        getWrappingKeyIfExists(alias)?.let {
+            diagLog(context, "getOrCreateWrappingKey found-existing alias=$alias sdkInt=${Build.VERSION.SDK_INT} manufacturer=${Build.MANUFACTURER} model=${Build.MODEL}")
+            return it
+        }
 
         // StrongBox (a separate, tamper-resistant secure element, not
         // just the TEE) is only an API surface from Android 9 (API 28)
         // onward — guard rather than reference the flag/exception type on
         // older OS versions.
         val preferStrongBox = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
-        return generateWrappingKey(alias, strongBoxBacked = preferStrongBox)
+        diagLog(context, "getOrCreateWrappingKey generating-new alias=$alias preferStrongBox=$preferStrongBox sdkInt=${Build.VERSION.SDK_INT} manufacturer=${Build.MANUFACTURER} model=${Build.MODEL}")
+        return generateWrappingKey(context, alias, strongBoxBacked = preferStrongBox)
     }
 
     /**
@@ -107,7 +162,7 @@ internal object MasterKeyManager {
      * normal (TEE-backed, still hardware-isolated) Keystore key rather
      * than failing E2EE setup entirely.
      */
-    private fun generateWrappingKey(alias: String, strongBoxBacked: Boolean): javax.crypto.SecretKey {
+    private fun generateWrappingKey(context: Context, alias: String, strongBoxBacked: Boolean): javax.crypto.SecretKey {
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         val specBuilder = KeyGenParameterSpec.Builder(
             alias,
@@ -128,9 +183,24 @@ internal object MasterKeyManager {
 
         return try {
             generator.init(specBuilder.build())
-            generator.generateKey()
+            val key = generator.generateKey()
+            diagLog(context, "generateWrappingKey success alias=$alias strongBoxBacked=$strongBoxBacked")
+            key
         } catch (e: StrongBoxUnavailableException) {
-            generateWrappingKey(alias, strongBoxBacked = false)
+            diagWarn(context, "generateWrappingKey StrongBoxUnavailableException alias=$alias — falling back to non-StrongBox, message=${e.message}")
+            generateWrappingKey(context, alias, strongBoxBacked = false)
+        } catch (e: Exception) {
+            // Diagnostic-only: every other exception type is rethrown
+            // unchanged (no behavior change) — this just makes sure the
+            // exact exception class reaches logcat before that happens,
+            // since only StrongBoxUnavailableException gets a fallback
+            // today and anything else (a real possibility on some Honor
+            // StrongBox HAL implementations, which are documented to throw
+            // undocumented exception types beyond the one Android's own
+            // API contract promises) would otherwise surface only as a
+            // generic rejected-promise message with no native-side trace.
+            diagLogError(context, "generateWrappingKey UNEXPECTED exceptionType=${e::class.qualifiedName} alias=$alias strongBoxBacked=$strongBoxBacked message=${e.message}")
+            throw e
         }
     }
 

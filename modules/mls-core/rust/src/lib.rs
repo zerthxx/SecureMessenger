@@ -166,6 +166,33 @@ pub fn initialize(
     Ok(())
 }
 
+/// TEMPORARY diagnostic export — added to prove or disprove whether
+/// [`initialize`] and every other function routed through [`with_store`]
+/// (in practice, [`generate_identity_key`]) are observing the *same*
+/// in-memory `STORES` static within one process. Reports only the
+/// static's own address and its current Some/None state — never
+/// anything from inside `OpenStores` (no key material, no paths, no
+/// account data). If two calls in the same process/thread/Kotlin
+/// instance report *different* `stores_address` values, that is direct
+/// proof the two calls are not sharing one loaded copy of this library's
+/// global state — see the Honor-device `StorageNotInitialized`
+/// investigation. Remove once the root cause is confirmed.
+#[derive(uniffi::Record)]
+pub struct DiagStoresState {
+    /// Address of the `STORES` static itself, as observed by *this*
+    /// call — not a pointer to any secret, just this process's view of
+    /// where its own global variable lives.
+    pub stores_address: u64,
+    pub is_some: bool,
+}
+
+#[uniffi::export]
+pub fn diag_stores_state() -> DiagStoresState {
+    let address = std::ptr::addr_of!(STORES) as u64;
+    let is_some = STORES.lock().map(|g| g.is_some()).unwrap_or(false);
+    DiagStoresState { stores_address: address, is_some }
+}
+
 /// Generates the account's identity signing key if one doesn't already
 /// exist on this device, or returns the existing one. This key is meant
 /// to exist exactly once per account and is cross-signed onto every

@@ -678,6 +678,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_decrypt_message(
     ): Int
+    external fun uniffi_mls_core_checksum_func_diag_stores_state(
+    ): Int
     external fun uniffi_mls_core_checksum_func_encrypt_message(
     ): Int
     external fun uniffi_mls_core_checksum_func_generate_device_credential(
@@ -708,6 +710,8 @@ internal object UniffiLib {
     external fun uniffi_mls_core_fn_func_create_group(`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_mls_core_fn_func_decrypt_message(`groupId`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_diag_stores_state(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_encrypt_message(`groupId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -849,6 +853,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_mls_core_checksum_func_decrypt_message() != 3788) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_mls_core_checksum_func_diag_stores_state() != 35234) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_encrypt_message() != 41753) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -986,6 +993,52 @@ public object FfiConverterUInt: FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
+
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
+
+    override fun allocationSize(value: ULong) = 8UL
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1102,6 +1155,62 @@ public object FfiConverterTypeDeviceCredentialInfo: FfiConverterRustBuffer<Devic
     override fun write(value: DeviceCredentialInfo, buf: ByteBuffer) {
             FfiConverterByteArray.write(value.`credentialPublicKey`, buf)
             FfiConverterByteArray.write(value.`crossSignature`, buf)
+    }
+}
+
+
+
+/**
+ * TEMPORARY diagnostic export — added to prove or disprove whether
+ * [`initialize`] and every other function routed through [`with_store`]
+ * (in practice, [`generate_identity_key`]) are observing the *same*
+ * in-memory `STORES` static within one process. Reports only the
+ * static's own address and its current Some/None state — never
+ * anything from inside `OpenStores` (no key material, no paths, no
+ * account data). If two calls in the same process/thread/Kotlin
+ * instance report *different* `stores_address` values, that is direct
+ * proof the two calls are not sharing one loaded copy of this library's
+ * global state — see the Honor-device `StorageNotInitialized`
+ * investigation. Remove once the root cause is confirmed.
+ */
+data class DiagStoresState (
+    /**
+     * Address of the `STORES` static itself, as observed by *this*
+     * call — not a pointer to any secret, just this process's view of
+     * where its own global variable lives.
+     */
+    var `storesAddress`: kotlin.ULong
+    , 
+    var `isSome`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDiagStoresState: FfiConverterRustBuffer<DiagStoresState> {
+    override fun read(buf: ByteBuffer): DiagStoresState {
+        return DiagStoresState(
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DiagStoresState) = (
+            FfiConverterULong.allocationSize(value.`storesAddress`) +
+            FfiConverterBoolean.allocationSize(value.`isSome`)
+    )
+
+    override fun write(value: DiagStoresState, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`storesAddress`, buf)
+            FfiConverterBoolean.write(value.`isSome`, buf)
     }
 }
 
@@ -1410,6 +1519,16 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
         
         FfiConverterByteArray.lower(`groupId`),
         FfiConverterByteArray.lower(`ciphertext`),_status)
+}
+    )
+    }
+    
+ fun `diagStoresState`(): DiagStoresState {
+            return FfiConverterTypeDiagStoresState.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_diag_stores_state(
+    
+        _status)
 }
     )
     }

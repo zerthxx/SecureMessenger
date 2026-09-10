@@ -1,5 +1,6 @@
 package expo.modules.mlscore
 
+import android.util.Log
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -10,12 +11,35 @@ import uniffi.mls_core.MlsCoreException
 import uniffi.mls_core.addMemberToGroup
 import uniffi.mls_core.createGroup
 import uniffi.mls_core.decryptMessage
+// TEMPORARY diagnostic import — see diagStoresState() call sites below.
+import uniffi.mls_core.diagStoresState
 import uniffi.mls_core.encryptMessage
 import uniffi.mls_core.generateDeviceCredential
 import uniffi.mls_core.generateIdentityKey
 import uniffi.mls_core.generateKeyPackages
 import uniffi.mls_core.initialize as mlsCoreInitialize
 import uniffi.mls_core.joinGroupFromWelcome
+
+// TEMPORARY diagnostic instrumentation — see MasterKeyManager.kt's
+// DIAG_TAG comment for full context. Same tag string (file-private
+// consts can't be shared across files) so a logcat filter on this one
+// tag captures both files' checkpoints in order.
+//
+// Audit fix: gated behind FLAG_DEBUGGABLE like MasterKeyManager.kt — this
+// file doesn't log key material, but it does log per-account userId on
+// every call, which has no place in a release build's logcat either.
+private const val DIAG_TAG = "MlsCoreDiag"
+
+private fun isDebugBuild(context: android.content.Context?): Boolean =
+    context != null && (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+private fun diagLog(context: android.content.Context?, message: String) {
+    if (isDebugBuild(context)) Log.d(DIAG_TAG, message)
+}
+
+private fun diagLogError(context: android.content.Context?, message: String) {
+    if (isDebugBuild(context)) Log.e(DIAG_TAG, message)
+}
 
 private const val STORE_FILE_NAME = "mls_core_store.bin"
 
@@ -103,29 +127,102 @@ class MlsCoreModule : Module() {
 
     AsyncFunction("initialize") { userId: String ->
       val safeUserId = sanitizeNamespace(userId)
+      // TEMPORARY diagnostic instrumentation — see MasterKeyManager.kt's
+      // DIAG_TAG comment. instanceId/threadId let a future logcat capture
+      // prove or rule out "different instance"/"different thread" theories
+      // directly, rather than relying on code-level reasoning about Expo
+      // Modules' AsyncFunction dispatch (which is proven single-threaded
+      // per module in expo-modules-core's own source, but this makes that
+      // provable from real device output too, not just source reading).
+      val instanceId = System.identityHashCode(this@MlsCoreModule)
+      val threadId = Thread.currentThread().id
+      val diagContext = appContext.reactContext
+      diagLog(
+        diagContext,
+        "initialize-start userId=$safeUserId instanceId=$instanceId threadId=$threadId cachedFlag=$initializedForUserId",
+      )
       if (initializedForUserId != safeUserId) {
         val context = appContext.reactContext
           ?: throw CodedException("MlsCoreError", "No Android context available", null)
 
-        val masterKey = MasterKeyManager.getOrCreateMasterKey(context, safeUserId)
-        val (storeFile, groupStoreFile) = namespacedStoragePaths(context, safeUserId)
-
+        // `getOrCreateMasterKey` and `namespacedStoragePaths` used to run
+        // outside this try/catch, so any failure there (Android Keystore/
+        // StrongBox errors are the concrete case — some OEM devices throw
+        // exceptions other than the documented StrongBoxUnavailableException
+        // from key generation/wrap/unwrap) propagated as a raw, uncaught
+        // exception instead of a well-formed rejection, and — critically —
+        // left `initializedForUserId` unset either way, so that specific
+        // failure mode was always safe against a *false* "initialized"
+        // state. This change doesn't alter that safety; it only makes the
+        // resulting JS-visible error clear and consistently shaped instead
+        // of whatever the platform exception's default formatting happens
+        // to be.
         try {
+          val masterKey = MasterKeyManager.getOrCreateMasterKey(context, safeUserId)
+          val (storeFile, groupStoreFile) = namespacedStoragePaths(context, safeUserId)
+          diagLog(
+            diagContext,
+            "storage-open-start userId=$safeUserId storeFile=${storeFile.absolutePath} storeFileExists=${storeFile.exists()} " +
+              "groupStoreFile=${groupStoreFile.absolutePath} groupStoreFileExists=${groupStoreFile.exists()} instanceId=$instanceId",
+          )
           mlsCoreInitialize(safeUserId, storeFile.absolutePath, groupStoreFile.absolutePath, masterKey)
+          diagLog(diagContext, "storage-open-success userId=$safeUserId instanceId=$instanceId")
+          // TEMPORARY diagnostic — reads STORES's own address/state
+          // directly from Rust, immediately after initialize() returned
+          // Ok. Compare diag-after-initialize's storesAddress against
+          // diag-before-generateIdentityKey's below: if they differ,
+          // that's direct proof the two calls aren't sharing one loaded
+          // copy of this library's global state.
+          val diagAfterInit = diagStoresState()
+          diagLog(
+            diagContext,
+            "diag-after-initialize userId=$safeUserId storesAddress=0x${diagAfterInit.storesAddress.toString(16)} " +
+              "isSome=${diagAfterInit.isSome} instanceId=$instanceId",
+          )
           initializedForUserId = safeUserId
         } catch (e: MlsCoreException) {
+          diagLogError(diagContext, "storage-open-failure userId=$safeUserId instanceId=$instanceId type=MlsCoreException variant=${e::class.simpleName}")
           throw MlsCoreRuntimeError(e)
+        } catch (e: Exception) {
+          diagLogError(diagContext, "storage-open-failure userId=$safeUserId instanceId=$instanceId type=${e::class.qualifiedName} message=${e.message}")
+          throw CodedException(
+            "MlsCoreError",
+            "Failed to prepare local encrypted storage: ${(e.message ?: e::class.simpleName ?: "unknown error")}",
+            e,
+          )
         }
+      } else {
+        diagLog(diagContext, "initialize-skip-already-cached userId=$safeUserId instanceId=$instanceId")
       }
+      diagLog(diagContext, "initialize-resolved userId=$safeUserId cachedFlagNow=$initializedForUserId instanceId=$instanceId")
       null
     }
 
     AsyncFunction("generateIdentityKey") {
+      val instanceId = System.identityHashCode(this@MlsCoreModule)
+      val threadId = Thread.currentThread().id
+      val diagContext = appContext.reactContext
+      diagLog(diagContext, "generateIdentityKey-start instanceId=$instanceId threadId=$threadId cachedFlag=$initializedForUserId")
+      // TEMPORARY diagnostic — same probe as diag-after-initialize, but
+      // read immediately before the real generateIdentityKey() call.
+      // This is the decisive comparison: same address+isSome=true here
+      // as diag-after-initialize reported → the duplicate-library
+      // hypothesis is disproven, investigate Rust state mutation
+      // instead. Different address, or same address but isSome=false →
+      // duplicate-library/state-loss hypothesis is proven.
+      val diagBeforeGenerate = diagStoresState()
+      diagLog(
+        diagContext,
+        "diag-before-generateIdentityKey storesAddress=0x${diagBeforeGenerate.storesAddress.toString(16)} " +
+          "isSome=${diagBeforeGenerate.isSome} instanceId=$instanceId",
+      )
       requireInitialized()
       try {
         val info: IdentityKeyInfo = generateIdentityKey()
+        diagLog(diagContext, "generateIdentityKey-success instanceId=$instanceId")
         mapOf("publicKey" to info.publicKey)
       } catch (e: MlsCoreException) {
+        diagLogError(diagContext, "generateIdentityKey-failure instanceId=$instanceId variant=${e::class.simpleName}")
         throw MlsCoreRuntimeError(e)
       }
     }
