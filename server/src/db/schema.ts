@@ -1,6 +1,7 @@
 import {
   customType,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -203,9 +204,38 @@ export const auditEvents = pgTable(
   (table) => [index('audit_events_user_id_created_at_idx').on(table.userId, table.createdAt)],
 );
 
+/**
+ * Opaque storage for one voice-message audio blob. `data` holds MLS
+ * ciphertext produced by the SAME per-conversation `encryptMessage` call
+ * used for ordinary text messages (see mlsCore.ts/group.rs) — the server
+ * has no more ability to decrypt this than it does `messages.ciphertext`.
+ * The corresponding chat message is a normal `messages` row (type
+ * 'application') whose plaintext, once decrypted client-side, is a small
+ * JSON envelope carrying this row's `id` plus duration/size — see
+ * ChatContext's `SMVOICE1:` prefix convention. Deliberately its own
+ * table rather than inline in `messages.ciphertext`: voice clips are much
+ * larger than a typical text ciphertext and are fetched independently
+ * (lazily, on first playback) via the REST media endpoint, not through
+ * the tRPC JSON transport.
+ */
+export const mediaObjects = pgTable(
+  'media_objects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    senderDeviceId: uuid('sender_device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    byteSize: integer('byte_size').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('media_objects_conversation_id_created_at_idx').on(table.conversationId, table.createdAt)],
+);
+
 /*
  * Deliberately not modeled yet:
- *   - media_objects  (arrives with the media-upload phase)
  *   - stories        (arrives with the stories phase)
  *
  * Deliberately NOT added even though Phase 5C introduces real MLS

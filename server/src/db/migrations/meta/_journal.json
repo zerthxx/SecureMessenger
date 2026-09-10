@@ -29,6 +29,13 @@
       "when": 1786215922141,
       "tag": "0003_easy_master_chief",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786536746707,
+      "tag": "0004_deep_forge",
+      "breakpoints": true
     }
   ]
 }

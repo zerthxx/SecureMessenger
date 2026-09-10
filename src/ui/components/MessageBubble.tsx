@@ -2,13 +2,18 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import type { Message } from '@/domain/entities';
+import { pauseVoiceMessage, playVoiceMessage } from '@/infrastructure/media/voicePlayer';
+import { useVoicePlaybackState } from '@/ui/hooks/useVoicePlayback';
 import { useTheme } from '@/ui/theme';
 import { AppText } from './AppText';
+import { formatClockDuration } from './VoiceRecorderBar';
 
 export interface MessageBubbleProps {
   message: Message;
   isOwn: boolean;
   onRetry?: () => void;
+  /** Called when a received voice message's audio hasn't been downloaded yet (or a previous download failed) and the user taps play. */
+  onDownloadAudio?: () => void;
 }
 
 function formatTime(iso: string): string {
@@ -17,7 +22,87 @@ function formatTime(iso: string): string {
   return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-export function MessageBubble({ message, isOwn, onRetry }: MessageBubbleProps): React.JSX.Element {
+function VoiceBubbleContent({
+  message,
+  isOwn,
+  onDownloadAudio,
+}: {
+  message: Message;
+  isOwn: boolean;
+  onDownloadAudio?: () => void;
+}): React.JSX.Element {
+  const theme = useTheme();
+  const playback = useVoicePlaybackState(message.id);
+  const isActivePlayer = playback.duration > 0 || playback.playing;
+  const totalMs = message.audioDurationMs ?? 0;
+  const currentMs = isActivePlayer ? playback.currentTime * 1000 : 0;
+  const progress = isActivePlayer && playback.duration > 0 ? Math.min(1, currentMs / (playback.duration * 1000)) : 0;
+
+  const iconColor = isOwn ? theme.colors.onPrimary : theme.colors.textPrimary;
+  const trackColor = isOwn ? 'rgba(255,255,255,0.35)' : theme.colors.border;
+  const fillColor = isOwn ? theme.colors.onPrimary : theme.colors.primary;
+
+  function handlePress() {
+    if (message.audioState === 'downloaded' && message.audioLocalUri) {
+      if (playback.playing) {
+        pauseVoiceMessage(message.id);
+      } else {
+        playVoiceMessage(message.id, message.audioLocalUri);
+      }
+      return;
+    }
+    // idle, failed, or (defensively) any other non-ready state — (re)try fetching+decrypting the blob.
+    if (message.audioState !== 'downloading') {
+      onDownloadAudio?.();
+    }
+  }
+
+  const isDownloading = message.audioState === 'downloading';
+  const isFailedAudio = message.audioState === 'failed';
+
+  let icon: keyof typeof Ionicons.glyphMap;
+  let accessibilityLabel: string;
+  if (isDownloading) {
+    icon = 'ellipsis-horizontal';
+    accessibilityLabel = 'Downloading voice message';
+  } else if (isFailedAudio) {
+    icon = 'refresh';
+    accessibilityLabel = 'Retry voice message';
+  } else if (playback.playing) {
+    icon = 'pause';
+    accessibilityLabel = 'Pause voice message';
+  } else {
+    icon = 'play';
+    accessibilityLabel = 'Play voice message';
+  }
+
+  return (
+    <View style={styles.voiceRow}>
+      <Pressable
+        onPress={handlePress}
+        disabled={isDownloading}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        hitSlop={8}
+        style={[styles.voicePlayButton, { backgroundColor: isOwn ? 'rgba(255,255,255,0.2)' : theme.colors.primaryMuted }]}
+      >
+        <Ionicons name={icon} size={18} color={isFailedAudio ? theme.colors.danger : iconColor} />
+      </Pressable>
+      <View style={styles.voiceMeta}>
+        <View style={[styles.voiceTrack, { backgroundColor: trackColor }]}>
+          <View style={[styles.voiceTrackFill, { backgroundColor: fillColor, width: `${progress * 100}%` }]} />
+        </View>
+        <AppText variant="caption" style={{ color: isOwn ? theme.colors.onPrimary : theme.colors.textTertiary }}>
+          {isFailedAudio
+            ? 'Couldn’t load audio · Tap to retry'
+            : `${formatClockDuration(isActivePlayer ? currentMs : 0)} / ${formatClockDuration(totalMs)}`}
+        </AppText>
+      </View>
+    </View>
+  );
+}
+
+export function MessageBubble({ message, isOwn, onRetry, onDownloadAudio }: MessageBubbleProps): React.JSX.Element {
   const theme = useTheme();
 
   // SECURITY: a failed decryption must never fall back to showing
@@ -39,6 +124,7 @@ export function MessageBubble({ message, isOwn, onRetry }: MessageBubbleProps): 
     );
   }
 
+  const isVoice = message.kind === 'voice';
   const isFailedSend = message.status === 'failed';
   const bubbleColor = isOwn ? theme.colors.primary : theme.colors.surfaceElevated;
   const textColor = isOwn ? theme.colors.onPrimary : theme.colors.textPrimary;
@@ -47,6 +133,7 @@ export function MessageBubble({ message, isOwn, onRetry }: MessageBubbleProps): 
     <View
       style={[
         styles.bubble,
+        isVoice && styles.voiceBubble,
         {
           backgroundColor: isFailedSend ? theme.colors.surfaceElevated : bubbleColor,
           borderColor: isFailedSend ? theme.colors.danger : 'transparent',
@@ -54,9 +141,13 @@ export function MessageBubble({ message, isOwn, onRetry }: MessageBubbleProps): 
         },
       ]}
     >
-      <AppText variant="body" style={{ color: isFailedSend ? theme.colors.textPrimary : textColor }}>
-        {message.text}
-      </AppText>
+      {isVoice ? (
+        <VoiceBubbleContent message={message} isOwn={isOwn} onDownloadAudio={onDownloadAudio} />
+      ) : (
+        <AppText variant="body" style={{ color: isFailedSend ? theme.colors.textPrimary : textColor }}>
+          {message.text}
+        </AppText>
+      )}
       <View style={styles.metaRow}>
         {message.status === 'sending' ? (
           <Ionicons name="time-outline" size={12} color={isOwn ? theme.colors.onPrimary : theme.colors.textTertiary} />
@@ -80,7 +171,7 @@ export function MessageBubble({ message, isOwn, onRetry }: MessageBubbleProps): 
   return (
     <View style={[styles.row, isOwn ? styles.rowOwn : styles.rowOther]}>
       {isFailedSend && onRetry ? (
-        <Pressable onPress={onRetry} accessibilityRole="button" accessibilityLabel="Retry sending message">
+        <Pressable onPress={onRetry} accessibilityRole="button" accessibilityLabel={isVoice ? 'Retry voice message' : 'Retry sending message'}>
           {bubble}
         </Pressable>
       ) : (
@@ -107,6 +198,33 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 9,
+  },
+  voiceBubble: {
+    minWidth: 180,
+  },
+  voiceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  voicePlayButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceMeta: {
+    flex: 1,
+    gap: 4,
+  },
+  voiceTrack: {
+    height: 3,
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  voiceTrackFill: {
+    height: '100%',
   },
   metaRow: {
     flexDirection: 'row',

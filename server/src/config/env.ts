@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+import { resolveTrustProxy } from './trustProxy.js';
+
 /**
  * Every environment variable the server depends on, validated once at
  * startup. Fail fast and loud rather than run with an undefined secret —
@@ -19,6 +21,17 @@ const envSchema = z.object({
   ACCESS_TOKEN_SECRET: z
     .string()
     .min(32, 'ACCESS_TOKEN_SECRET must be at least 32 characters — generate with `openssl rand -base64 32`'),
+  // Local-disk directory for opaque voice-message ciphertext blobs (see
+  // lib/mediaStorage.ts). Not a cloud/S3 path on purpose — there is no
+  // object-storage backend configured anywhere else in this project, and
+  // these blobs are already size-bounded, encrypted, opaque bytes, so a
+  // plain directory is the smallest correct storage for this phase.
+  MEDIA_STORAGE_DIR: z.string().min(1).default('./data/media'),
+  // Which upstream proxy addresses may be believed when deriving the
+  // real client IP from X-Forwarded-For. See `resolveTrustProxy` below
+  // for the accepted values and why this is expressed as a trusted-CIDR
+  // list rather than a hop count.
+  TRUST_PROXY: z.string().optional(),
 });
 
 function loadEnv() {
@@ -38,3 +51,18 @@ function loadEnv() {
 export const env = loadEnv();
 export const isProduction = env.NODE_ENV === 'production';
 export type Env = typeof env;
+
+/**
+ * Which upstream hops may be believed when deriving the real client IP.
+ * See config/trustProxy.ts for why this is a trusted-address list
+ * rather than a hop count, and why that choice is spoof-resistant.
+ */
+export const trustProxyOption = resolveTrustProxy(env.TRUST_PROXY, isProduction);
+
+/**
+ * True when every request will resolve to the same `req.ip` regardless
+ * of who sent it, which silently collapses every per-IP rate limit into
+ * one globally shared bucket. Surfaced at startup rather than left to be
+ * discovered in production.
+ */
+export const trustProxyDisabledBehindProxy = isProduction && trustProxyOption === false;

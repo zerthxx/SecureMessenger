@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
+import { Alert, AppState, FlatList, KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import type { Message } from '@/domain/entities';
@@ -16,7 +16,27 @@ export function ConversationScreen(): React.JSX.Element {
   const router = useRouter();
   const theme = useTheme();
   const { deviceId } = useAuth();
-  const { conversations, getMessages, pollConversation, sendChatMessage, retryMessage } = useChat();
+  const {
+    conversations,
+    e2eeError,
+    retryE2eeSetup,
+    getMessages,
+    pollConversation,
+    sendChatMessage,
+    sendVoiceMessage,
+    downloadVoiceMessage,
+    retryMessage,
+  } = useChat();
+  const [retrying, setRetrying] = useState(false);
+
+  async function handleRetryE2eeSetup() {
+    setRetrying(true);
+    try {
+      await retryE2eeSetup();
+    } finally {
+      setRetrying(false);
+    }
+  }
   const [loaded, setLoaded] = useState(false);
   const listRef = useRef<FlatList<Message>>(null);
 
@@ -33,10 +53,40 @@ export function ConversationScreen(): React.JSX.Element {
       await pollConversation(id);
       if (!cancelled) setLoaded(true);
     })();
-    const interval = setInterval(() => pollConversation(id), POLL_MS);
+
+    // Audit fix: this previously polled every POLL_MS unconditionally,
+    // including while backgrounded — the single clearest battery/network
+    // cost found in the client audit, compounding with ChatContext's own
+    // conversation-list poll. Paused while AppState isn't 'active', with
+    // an immediate refresh on returning to foreground so messages aren't
+    // stale on resume.
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const startInterval = () => {
+      if (interval) return;
+      interval = setInterval(() => pollConversation(id), POLL_MS);
+    };
+    const stopInterval = () => {
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+
+    if (AppState.currentState === 'active') startInterval();
+
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        pollConversation(id);
+        startInterval();
+      } else {
+        stopInterval();
+      }
+    });
+
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      stopInterval();
+      subscription.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -50,9 +100,23 @@ export function ConversationScreen(): React.JSX.Element {
     }
   }
 
+  async function handleSendVoice(uri: string, durationMs: number) {
+    if (!id) return;
+    try {
+      await sendVoiceMessage(id, uri, durationMs);
+    } catch (err) {
+      Alert.alert('Could not send voice message', getApiErrorMessage(err));
+    }
+  }
+
   async function handleRetry(messageId: string) {
     if (!id) return;
     await retryMessage(id, messageId);
+  }
+
+  async function handleDownloadAudio(messageId: string) {
+    if (!id) return;
+    await downloadVoiceMessage(id, messageId);
   }
 
   if (!id) {
@@ -72,18 +136,28 @@ export function ConversationScreen(): React.JSX.Element {
       <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
         <TopBar
           title={conversation?.otherDisplayName ?? 'Chat'}
-          subtitle={conversation?.groupJoined ? 'Encrypted' : 'Setting up encryption…'}
+          subtitle={conversation?.groupJoined ? 'Encrypted' : e2eeError ? 'Encryption unavailable' : 'Setting up encryption…'}
           onBack={() => router.back()}
         />
         {!loaded ? (
           <LoadingState rows={5} />
         ) : messages.length === 0 ? (
           <View style={styles.emptyWrap}>
-            <EmptyState
-              icon="chatbubble-ellipses-outline"
-              title="No messages yet"
-              message={conversation?.groupJoined ? 'Say hello — messages are end-to-end encrypted.' : 'Waiting for encryption to finish setting up.'}
-            />
+            {!conversation?.groupJoined && e2eeError ? (
+              <EmptyState
+                icon="alert-circle-outline"
+                title="Encrypted messaging unavailable"
+                message={e2eeError}
+                actionLabel={retrying ? 'Retrying…' : 'Retry'}
+                onAction={retrying ? undefined : handleRetryE2eeSetup}
+              />
+            ) : (
+              <EmptyState
+                icon="chatbubble-ellipses-outline"
+                title="No messages yet"
+                message={conversation?.groupJoined ? 'Say hello — messages are end-to-end encrypted.' : 'Waiting for encryption to finish setting up.'}
+              />
+            )}
           </View>
         ) : (
           <FlatList
@@ -97,12 +171,13 @@ export function ConversationScreen(): React.JSX.Element {
                 message={item}
                 isOwn={item.senderDeviceId === deviceId}
                 onRetry={item.status === 'failed' ? () => handleRetry(item.id) : undefined}
+                onDownloadAudio={item.kind === 'voice' ? () => handleDownloadAudio(item.id) : undefined}
               />
             )}
             showsVerticalScrollIndicator={false}
           />
         )}
-        <MessageComposer disabled={!conversation?.groupJoined} onSend={handleSend} />
+        <MessageComposer disabled={!conversation?.groupJoined} onSend={handleSend} onSendVoice={handleSendVoice} />
       </View>
     </KeyboardAvoidingView>
   );

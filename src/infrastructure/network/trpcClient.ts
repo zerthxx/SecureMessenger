@@ -30,7 +30,19 @@ import type { AppRouter, RouterInputs, RouterOutputs } from '../../../server/src
  * fallback a minifier isn't guaranteed to fold away.
  */
 function resolveApiBaseUrl(): string {
-  if (process.env.EXPO_PUBLIC_API_URL) return process.env.EXPO_PUBLIC_API_URL;
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    const url = process.env.EXPO_PUBLIC_API_URL;
+    // Audit fix: the APK download URL was already checked for `https:`
+    // (see isApkUrlTrusted in the update module) but the API base URL
+    // itself had no equivalent check — a release accidentally built with
+    // an http:// EXPO_PUBLIC_API_URL would silently send every tRPC call
+    // (including auth tokens) in plaintext. __DEV__-gated so local/LAN
+    // development against a plain-http dev server keeps working.
+    if (!__DEV__ && !url.startsWith('https://')) {
+      throw new Error('EXPO_PUBLIC_API_URL must use https:// in a release build.');
+    }
+    return url;
+  }
   if (__DEV__) return 'http://10.0.2.2:4000';
   throw new Error('EXPO_PUBLIC_API_URL must be set for a release build.');
 }
@@ -47,6 +59,17 @@ let currentAccessToken: string | null = null;
 /** Called by AuthContext whenever the session changes — login, refresh, logout. */
 export function setAccessToken(token: string | null): void {
   currentAccessToken = token;
+}
+
+/**
+ * Exposes the current access token to other trusted HTTP clients in this
+ * app (currently just voiceMediaApi.ts's binary upload/download, which
+ * can't go through httpBatchLink) so there is exactly one source of
+ * truth for "what token is live right now" — never a second, independently
+ * tracked copy.
+ */
+export function getAccessTokenForRequest(): string | null {
+  return currentAccessToken;
 }
 
 const untypedClient = createTRPCUntypedClient<AppRouter>({
@@ -117,6 +140,32 @@ async function withAuthRetry<T>(call: () => Promise<T>): Promise<T> {
     }
     await refreshInFlight;
     return call();
+  }
+}
+
+/**
+ * Same refresh-and-dedupe mechanism as `withAuthRetry` above, exposed for
+ * callers outside the tRPC client (voiceMediaApi.ts's plain `fetch`
+ * calls, which get a raw HTTP 401 rather than a `TRPCClientError` and so
+ * can't reuse `withAuthRetry` directly). Shares the same
+ * `authRefreshHandler`/`refreshInFlight` state, so a refresh triggered
+ * from here and one triggered from a concurrent tRPC 401 are still
+ * deduped to a single in-flight exchange. Returns `false` (never throws)
+ * on a failed/unavailable refresh — the caller's own request will then
+ * fail with whatever 401 response it already got.
+ */
+export async function refreshAccessTokenOnce(): Promise<boolean> {
+  if (!authRefreshHandler) return false;
+  if (!refreshInFlight) {
+    refreshInFlight = authRefreshHandler().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  try {
+    await refreshInFlight;
+    return true;
+  } catch {
+    return false;
   }
 }
 
