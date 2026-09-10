@@ -1,11 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { FlatList, StyleSheet, View } from 'react-native';
-import { useRouter, type Href } from 'expo-router';
+import { useFocusEffect, useRouter, type Href } from 'expo-router';
 
 import type { Chat, Conversation } from '@/domain/entities';
 import { useChat } from '@/ui/screens/chat';
 import { useTheme } from '@/ui/theme';
 import { ChatRow, Divider, EmptyState, ErrorState, IconButton, TextField, TopBar } from '@/ui/components';
+
+// See canNavigateRef's doc comment below — 400ms comfortably covers the
+// native slide transition duration (typically ~250-300ms) with margin.
+const NAV_SETTLE_MS = 400;
 
 function formatTimestamp(iso: string | null): string {
   if (!iso) return '';
@@ -37,9 +41,41 @@ function toChat(conversation: Conversation): Chat {
 export function ChatsScreen(): React.JSX.Element {
   const theme = useTheme();
   const router = useRouter();
-  const { conversations, e2eeError, refreshConversations } = useChat();
+  const { conversations, e2eeError, retryE2eeSetup, refreshConversations } = useChat();
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [retryingE2ee, setRetryingE2ee] = useState(false);
+
+  /**
+   * A row tapped within ~NAV_SETTLE_MS of this screen regaining focus (e.g.
+   * tapping "back" out of a conversation, then immediately tapping a
+   * different row before the native slide-back transition finishes) can
+   * have its touch misrouted to the wrong row's `onPress` closure while
+   * the outgoing screen is still animating out — this is a react-native-
+   * screens/native-stack transition race, not a routing or data bug (a
+   * conversation opened via a raw href always opens the correct one; only
+   * a tap landing mid-transition can target the wrong row). Ignoring taps
+   * until the transition has had time to settle closes that window.
+   */
+  const canNavigateRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      canNavigateRef.current = false;
+      const timer = setTimeout(() => {
+        canNavigateRef.current = true;
+      }, NAV_SETTLE_MS);
+      return () => clearTimeout(timer);
+    }, []),
+  );
+
+  async function handleRetryE2eeSetup() {
+    setRetryingE2ee(true);
+    try {
+      await retryE2eeSetup();
+    } finally {
+      setRetryingE2ee(false);
+    }
+  }
 
   const chats = useMemo(() => {
     const mapped = conversations.map(toChat);
@@ -71,7 +107,11 @@ export function ChatsScreen(): React.JSX.Element {
         }
       />
       {e2eeError ? (
-        <ErrorState title="Encrypted messaging unavailable" message={e2eeError} onRetry={refreshConversations} />
+        <ErrorState
+          title="Encrypted messaging unavailable"
+          message={e2eeError}
+          onRetry={retryingE2ee ? undefined : handleRetryE2eeSetup}
+        />
       ) : (
         <>
           <View style={styles.searchWrap}>
@@ -87,7 +127,10 @@ export function ChatsScreen(): React.JSX.Element {
               <View style={styles.rowPadding}>
                 <ChatRow
                   chat={item}
-                  onPress={() => router.push({ pathname: '/(home)/chats/[id]', params: { id: item.id } } as unknown as Href)}
+                  onPress={() => {
+                    if (!canNavigateRef.current) return;
+                    router.push({ pathname: '/(home)/chats/[id]', params: { id: item.id } } as unknown as Href);
+                  }}
                 />
               </View>
             )}

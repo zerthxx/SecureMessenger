@@ -7,6 +7,15 @@ import { AppText, Button, StepDots, TextField, TopBar } from '@/ui/components';
 import { useSignup } from './SignupContext';
 
 function pickTwoIndexes(length: number): [number, number] {
+  // Guard against length < 2: with a single candidate index, `second`
+  // can never differ from `first`, so the loop below would spin forever.
+  // This isn't just theoretical — `recoveryCode` gets reset to `[]` by
+  // this screen's own `handleConfirm` right before navigating away, and
+  // this function is re-invoked (via the `useMemo` below) on every
+  // re-render while this screen is still mounted during that transition.
+  if (length < 2) {
+    return [0, 0];
+  }
   const first = Math.floor(Math.random() * length);
   let second = Math.floor(Math.random() * length);
   while (second === first) {
@@ -32,8 +41,11 @@ export function ConfirmRecoveryCodeScreen(): React.JSX.Element {
       return;
     }
     setError(null);
-    reset();
+    // Navigate first: `reset()` clears `recoveryCode` to `[]`, which
+    // re-renders every consumer of SignupContext — including this
+    // still-mounted screen — before the route transition finishes.
     router.replace('/(home)');
+    reset();
   };
 
   return (

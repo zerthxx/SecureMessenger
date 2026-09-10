@@ -1,14 +1,20 @@
-import { useMemo } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useCallback, useMemo, useRef } from 'react';
+import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter, type Href } from 'expo-router';
+import { useFocusEffect, useRouter, type Href } from 'expo-router';
 
-import { mockCurrentUser, mockStories } from '@/data/mock';
 import type { Chat, Conversation } from '@/domain/entities';
+import { useAuth } from './auth';
 import { useChat } from '@/ui/screens/chat';
+import { UpdateBanner } from '@/ui/screens/update';
 import { useTheme } from '@/ui/theme';
-import { AppText, Card, ChatRow, Divider, IconButton, StoryRing } from '@/ui/components';
+import { AppText, Card, ChatRow, Divider, IconButton } from '@/ui/components';
+
+// See canNavigateRef's doc comment in HomeScreen below — 400ms
+// comfortably covers the native slide transition duration (typically
+// ~250-300ms) with margin.
+const NAV_SETTLE_MS = 400;
 
 function toChat(conversation: Conversation): Chat {
   return {
@@ -24,19 +30,62 @@ function toChat(conversation: Conversation): Chat {
   };
 }
 
-const quickActions: { icon: keyof typeof Ionicons.glyphMap; label: string }[] = [
-  { icon: 'create-outline', label: 'New chat' },
-  { icon: 'people-outline', label: 'New group' },
-  { icon: 'qr-code-outline', label: 'Scan code' },
-];
-
 export function HomeScreen(): React.JSX.Element {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { user } = useAuth();
   const { conversations } = useChat();
 
   const recentChats = useMemo(() => conversations.slice(0, 4).map(toChat), [conversations]);
+
+  /**
+   * A row tapped within ~NAV_SETTLE_MS of this screen regaining focus
+   * (e.g. tapping "back" out of a conversation, then immediately tapping
+   * a different row before the native slide-back transition finishes)
+   * can have its touch misrouted to the wrong row's `onPress` closure
+   * while the outgoing screen is still animating out — a react-native-
+   * screens/native-stack transition race, not a routing or data bug (a
+   * conversation opened via a raw href always opens the correct one;
+   * only a tap landing mid-transition can target the wrong row).
+   * Ignoring taps until the transition has had time to settle closes
+   * that window. Same fix as ChatsScreen's own recent-chats list.
+   */
+  const canNavigateRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      canNavigateRef.current = false;
+      const timer = setTimeout(() => {
+        canNavigateRef.current = true;
+      }, NAV_SETTLE_MS);
+      return () => clearTimeout(timer);
+    }, []),
+  );
+
+  const quickActions: { icon: keyof typeof Ionicons.glyphMap; label: string; accessibilityLabel: string; onPress: () => void }[] = [
+    {
+      icon: 'create-outline',
+      label: 'New chat',
+      accessibilityLabel: 'Start a new chat',
+      onPress: () => router.push('/(home)/chats/new' as unknown as Href),
+    },
+    {
+      icon: 'people-outline',
+      label: 'New group',
+      accessibilityLabel: 'Create a new group',
+      onPress: () => router.push('/(home)/groups' as unknown as Href),
+    },
+    {
+      icon: 'qr-code-outline',
+      label: 'Scan code',
+      accessibilityLabel: 'Scan a QR code',
+      onPress: () =>
+        Alert.alert(
+          'Scan code unavailable',
+          'QR code scanning needs camera access that this build does not yet include. This will be enabled in a future update.',
+        ),
+    },
+  ];
 
   return (
     <ScrollView
@@ -49,7 +98,7 @@ export function HomeScreen(): React.JSX.Element {
           <AppText variant="body" color="secondary">
             Good to see you
           </AppText>
-          <AppText variant="headline">{mockCurrentUser.name.split(' ')[0]}</AppText>
+          <AppText variant="headline">{(user?.displayName ?? '').split(' ')[0]}</AppText>
         </View>
         <IconButton
           name="person-circle-outline"
@@ -59,20 +108,17 @@ export function HomeScreen(): React.JSX.Element {
         />
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.storyTray} contentContainerStyle={styles.storyTrayContent}>
-        {mockStories.map((story) => (
-          <View key={story.id} style={styles.storyItem}>
-            <StoryRing name={story.authorName} seen={story.seen} />
-            <AppText variant="caption" color="secondary" numberOfLines={1} style={styles.storyLabel}>
-              {story.authorName === 'Your Story' ? 'Add' : story.authorName.split(' ')[0]}
-            </AppText>
-          </View>
-        ))}
-      </ScrollView>
+      <UpdateBanner />
 
       <View style={styles.quickActions}>
-        {quickActions.map((action) => {
-          const card = (
+        {quickActions.map((action) => (
+          <Pressable
+            key={action.label}
+            style={styles.quickActionCard}
+            accessibilityRole="button"
+            accessibilityLabel={action.accessibilityLabel}
+            onPress={action.onPress}
+          >
             <Card elevationLevel={1} style={styles.quickActionCardInner}>
               <View style={[styles.quickActionIcon, { backgroundColor: theme.colors.primaryMuted }]}>
                 <Ionicons name={action.icon} size={20} color={theme.colors.primary} />
@@ -81,26 +127,8 @@ export function HomeScreen(): React.JSX.Element {
                 {action.label}
               </AppText>
             </Card>
-          );
-          if (action.label !== 'New chat') {
-            return (
-              <View key={action.label} style={styles.quickActionCard}>
-                {card}
-              </View>
-            );
-          }
-          return (
-            <Pressable
-              key={action.label}
-              style={styles.quickActionCard}
-              accessibilityRole="button"
-              accessibilityLabel="Start a new chat"
-              onPress={() => router.push('/(home)/chats/new' as unknown as Href)}
-            >
-              {card}
-            </Pressable>
-          );
-        })}
+          </Pressable>
+        ))}
       </View>
 
       <View style={styles.sectionHeader}>
@@ -117,7 +145,10 @@ export function HomeScreen(): React.JSX.Element {
               <View style={styles.chatRowPadding}>
                 <ChatRow
                   chat={chat}
-                  onPress={() => router.push({ pathname: '/(home)/chats/[id]', params: { id: chat.id } } as unknown as Href)}
+                  onPress={() => {
+                    if (!canNavigateRef.current) return;
+                    router.push({ pathname: '/(home)/chats/[id]', params: { id: chat.id } } as unknown as Href);
+                  }}
                 />
               </View>
               {index < recentChats.length - 1 ? <Divider inset={72} /> : null}
@@ -139,21 +170,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-  },
-  storyTray: {
-    marginHorizontal: -20,
-  },
-  storyTrayContent: {
-    paddingHorizontal: 20,
-    gap: 16,
-  },
-  storyItem: {
-    alignItems: 'center',
-    width: 64,
-    gap: 6,
-  },
-  storyLabel: {
-    maxWidth: 64,
   },
   quickActions: {
     flexDirection: 'row',

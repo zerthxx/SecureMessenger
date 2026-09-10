@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
+import { useAppUpdate, UpdateSheet } from '@/ui/screens/update';
 import { useTheme, useThemePreference, type ThemePreference } from '@/ui/theme';
 import { AppText, Card, Divider, ListRow, TopBar } from '@/ui/components';
 
@@ -55,10 +56,17 @@ function ThemePicker(): React.JSX.Element {
 export function SettingsScreen(): React.JSX.Element {
   const theme = useTheme();
   const router = useRouter();
+  const { installedVersion, status, checkForUpdate } = useAppUpdate();
+  const [updateSheetVisible, setUpdateSheetVisible] = useState(false);
 
   const [readReceipts, setReadReceipts] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [lastSeen, setLastSeen] = useState(false);
+
+  async function handleCheckForUpdates() {
+    setUpdateSheetVisible(true);
+    await checkForUpdate();
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
@@ -107,7 +115,21 @@ export function SettingsScreen(): React.JSX.Element {
         <SectionLabel text="About" />
         <Card padded={false} style={styles.card}>
           <View style={styles.rowPadding}>
-            <ListRow icon="information-circle-outline" label="App version" subtitle="0.1.0 · Phase 1A" onPress={() => {}} />
+            <ListRow
+              icon="information-circle-outline"
+              label="App version"
+              subtitle={installedVersion ? `${installedVersion.versionName} (${installedVersion.versionCode})` : '—'}
+              onPress={() => {}}
+            />
+          </View>
+          <Divider inset={60} />
+          <View style={styles.rowPadding}>
+            <ListRow
+              icon="cloud-download-outline"
+              label="Check for updates"
+              subtitle={status === 'checking' ? 'Checking…' : undefined}
+              onPress={handleCheckForUpdates}
+            />
           </View>
           <Divider inset={60} />
           <View style={styles.rowPadding}>
@@ -115,6 +137,8 @@ export function SettingsScreen(): React.JSX.Element {
           </View>
         </Card>
       </ScrollView>
+
+      <UpdateSheet visible={updateSheetVisible} onClose={() => setUpdateSheetVisible(false)} />
     </View>
   );
 }

@@ -3,20 +3,21 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 
-import { mockChats, mockCurrentUser, mockGroups } from '@/data/mock';
 import { useTheme } from '@/ui/theme';
 import { AppText, Avatar, Card, ConfirmModal, Divider, ListRow } from '@/ui/components';
 import { useAuth } from './auth';
+import { useChat } from '@/ui/screens/chat';
 
 export function ProfileScreen(): React.JSX.Element {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { user, logout } = useAuth();
+  const { conversations } = useChat();
   const [signOutVisible, setSignOutVisible] = useState(false);
 
-  const displayName = user?.displayName ?? mockCurrentUser.name;
-  const handle = user ? `@${user.username}` : mockCurrentUser.handle;
+  const displayName = user?.displayName ?? '';
+  const handle = user ? `@${user.username}` : '';
 
   const handleSignOut = async () => {
     try {
@@ -27,10 +28,12 @@ export function ProfileScreen(): React.JSX.Element {
     }
   };
 
+  // Groups and Stories have no backend yet (see e2ee router / schema) —
+  // 0 is the real count, not a placeholder, until those features exist.
   const stats = [
-    { label: 'Chats', value: mockChats.length },
-    { label: 'Groups', value: mockGroups.length },
-    { label: 'Stories', value: 7 },
+    { label: 'Chats', value: conversations.length },
+    { label: 'Groups', value: 0 },
+    { label: 'Stories', value: 0 },
   ];
 
   return (
@@ -40,15 +43,12 @@ export function ProfileScreen(): React.JSX.Element {
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.identity}>
-        <Avatar name={displayName} size="xl" online={mockCurrentUser.online} />
+        <Avatar name={displayName} size="xl" />
         <AppText variant="headline" style={styles.name}>
           {displayName}
         </AppText>
         <AppText variant="body" color="secondary">
           {handle}
-        </AppText>
-        <AppText variant="body" color="secondary" style={styles.bio}>
-          {mockCurrentUser.bio}
         </AppText>
       </View>
 
@@ -118,11 +118,6 @@ const styles = StyleSheet.create({
   },
   name: {
     marginTop: 14,
-  },
-  bio: {
-    textAlign: 'center',
-    marginTop: 10,
-    maxWidth: 280,
   },
   statsCard: {
     flexDirection: 'row',

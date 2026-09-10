@@ -1,10 +1,13 @@
 import { FlatList, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-import { mockStories } from '@/data/mock';
 import type { Story } from '@/domain/entities';
 import { useTheme } from '@/ui/theme';
-import { Avatar, AppText, StoryRing, TopBar } from '@/ui/components';
+import { Avatar, AppText, EmptyState, StoryRing, TopBar } from '@/ui/components';
+
+// Stories aren't implemented server-side yet — a real, honest empty list
+// rather than fabricated stories until that backend work lands.
+const stories: Story[] = [];
 
 function StoryTile({ story }: { story: Story }): React.JSX.Element {
   const theme = useTheme();
@@ -41,11 +44,12 @@ export function StoriesScreen(): React.JSX.Element {
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
       <TopBar title="Stories" large />
       <FlatList
-        data={mockStories}
+        data={stories}
         keyExtractor={(item) => item.id}
         numColumns={3}
         contentContainerStyle={styles.gridContent}
         renderItem={({ item }) => <StoryTile story={item} />}
+        ListEmptyComponent={<EmptyState icon="sparkles-outline" title="No stories yet" message="Stories aren't available in this build yet." />}
         showsVerticalScrollIndicator={false}
       />
     </View>
