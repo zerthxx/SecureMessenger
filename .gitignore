@@ -21,6 +21,8 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+*.keystore
+keystore.properties
 
 # Metro
 .metro-health-check*
@@ -62,3 +64,17 @@ modules/mls-core/android/src/main/jniLibs/
 # Gradle build output for the local Expo module
 modules/mls-core/android/build/
 modules/mls-core/android/.cxx/
+
+# Gradle build output for the local app-updater Expo module
+modules/app-updater/android/build/
+
+# Local run logs from launching the dev stack (Metro, the emulator, the
+# API server, Gradle). Regenerated on every run; never useful in review.
+*.log
+
+# UI hierarchy dumps captured off an emulator while debugging.
+ui_*.xml
+
+# Voice-message blob storage for a local dev server — runtime data, and
+# the blobs are user content even though they are opaque ciphertext.
+server/data/

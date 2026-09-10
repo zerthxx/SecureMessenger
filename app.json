@@ -1,9 +1,9 @@
 {
   "expo": {
     "name": "Secure Messenger",
-    "slug": "secure-messenger",
+    "slug": "zerth",
     "scheme": "securemessenger",
-    "version": "0.1.0",
+    "version": "0.5.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "com.securemessenger.app",
+      "versionCode": 5,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -32,6 +33,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4aa18ef0-2ec6-4431-995b-1b2e65aabbb0"
+      }
+    },
+    "owner": "zerthxs-team"
   }
 }
