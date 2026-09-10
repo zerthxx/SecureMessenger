@@ -4,7 +4,13 @@ import { useTheme } from '@/ui/theme';
 import { AppText, Button } from '@/ui/components';
 import { useAppUpdate, type UpdateStatus } from './UpdateContext';
 
-const PROGRESS_STATUSES: UpdateStatus[] = ['downloading', 'verifying', 'installerLaunched', 'error'];
+const PROGRESS_STATUSES: UpdateStatus[] = [
+  'downloading',
+  'verifying',
+  'installerLaunched',
+  'incompatibleSignature',
+  'error',
+];
 
 /**
  * The update prompt — mounted once at the app root (see app/_layout.tsx)
@@ -34,6 +40,7 @@ export function UpdateDialog(): React.JSX.Element {
   const {
     status,
     manifest,
+    installedVersion,
     dialogVisible,
     progress,
     error,
@@ -54,8 +61,10 @@ export function UpdateDialog(): React.JSX.Element {
   // orphan the in-progress state with no way back to it). The persistent
   // indicator intentionally has no equivalent for mandatory updates —
   // the dialog itself never leaves the screen, so there's nothing for an
-  // indicator to reopen.
-  const dismissable = !mandatory && !busy;
+  // indicator to reopen. `incompatibleSignature` is always dismissable
+  // regardless of `mandatory`: there is no automatic path forward, so
+  // trapping the user in a non-dismissable dialog would help no one.
+  const dismissable = (!mandatory && !busy) || status === 'incompatibleSignature';
 
   function handleUpdateNow() {
     startUpdate();
@@ -118,6 +127,24 @@ export function UpdateDialog(): React.JSX.Element {
               </AppText>
               <View style={styles.actions}>
                 <Button label="Done" variant="secondary" onPress={closeUpdateDialog} />
+              </View>
+            </>
+          )}
+
+          {showProgress && status === 'incompatibleSignature' && (
+            <>
+              <AppText variant="title">Manual reinstall required</AppText>
+              <AppText variant="body" color="secondary" style={styles.message}>
+                {manifest && installedVersion
+                  ? `SecureMessenger v${manifest.versionName} is signed with a new production signing key. Android won't install it in place over v${installedVersion.versionName}, which was signed with the old key — this is a platform security protection, not an app bug.`
+                  : "This update is signed with a new production key that Android won't install in place over the version on this device — a platform security protection, not an app bug."}
+              </AppText>
+              <AppText variant="body" color="secondary" style={styles.message}>
+                To move to this version, back up anything you want to keep, then uninstall and reinstall
+                SecureMessenger yourself. We will never uninstall the app or delete your data automatically.
+              </AppText>
+              <View style={styles.actions}>
+                <Button label="Close" variant="secondary" onPress={closeUpdateDialog} />
               </View>
             </>
           )}

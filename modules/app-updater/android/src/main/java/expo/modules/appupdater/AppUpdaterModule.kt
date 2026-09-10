@@ -1,6 +1,8 @@
 package expo.modules.appupdater
 
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -104,6 +106,41 @@ class AppUpdaterModule : Module() {
       null
     }
 
+    // Compares the downloaded APK's signing certificate(s) against the
+    // certificate(s) the currently-installed app was signed with. Android's
+    // package installer silently (from our perspective — it shows its own
+    // generic "App not installed" dialog) refuses to install an update
+    // whose signing key doesn't match what's already on the device; this
+    // lets the JS layer detect that *before* handing the file to the
+    // installer, so the app can explain the real reason (a signing-key
+    // migration) instead of the user hitting an unexplained platform
+    // error. This never bypasses or weakens Android's own signature
+    // verification — it only reads the same certificates the platform
+    // itself would check, so the app can react to a mismatch gracefully.
+    AsyncFunction("isApkSignatureCompatible") { fileUri: String ->
+      val path = if (fileUri.startsWith("file://")) Uri.parse(fileUri).path else fileUri
+      if (path.isNullOrEmpty()) {
+        throw CodedException("AppUpdaterError", "Invalid file path: $fileUri", null)
+      }
+      val file = File(path)
+      if (!file.exists()) {
+        throw CodedException("AppUpdaterError", "File does not exist: $path", null)
+      }
+
+      val context = appContext.reactContext
+        ?: throw CodedException("AppUpdaterError", "No Android context available", null)
+      val packageManager = context.packageManager
+
+      val installedInfo = packageManager.getPackageInfo(context.packageName, signatureFlags())
+      val archiveInfo = packageManager.getPackageArchiveInfo(path, signatureFlags())
+        ?: throw CodedException("AppUpdaterError", "Could not read the downloaded APK's package info", null)
+
+      val installedCertificates = signingCertificateFingerprints(installedInfo)
+      val archiveCertificates = signingCertificateFingerprints(archiveInfo)
+
+      installedCertificates.isNotEmpty() && installedCertificates == archiveCertificates
+    }
+
     // `contentUri` must be a content:// URI (e.g. expo-file-system's
     // File.contentUri for the downloaded APK, backed by its own
     // FileProvider) — a file:// URI would be blocked by the platform's
@@ -139,5 +176,41 @@ class AppUpdaterModule : Module() {
       }
       null
     }
+  }
+
+  // GET_SIGNING_CERTIFICATES (API 28+) reflects the actual APK signature
+  // scheme v2/v3 signer(s); the deprecated GET_SIGNATURES is the only
+  // option below that. Kept as a plain private helper (not part of the
+  // module definition) since it's shared by both the installed-app and
+  // archive-file lookups above.
+  private fun signatureFlags(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      PackageManager.GET_SIGNING_CERTIFICATES
+    } else {
+      @Suppress("DEPRECATION")
+      PackageManager.GET_SIGNATURES
+    }
+
+  // Reduces a PackageInfo's signing certificate(s) to a set of SHA-256
+  // fingerprints so two APKs (installed vs. downloaded archive) can be
+  // compared for an exact signing-key match, independent of certificate
+  // ordering.
+  private fun signingCertificateFingerprints(info: PackageInfo): Set<String> {
+    val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      val signingInfo = info.signingInfo
+      if (signingInfo?.hasMultipleSigners() == true) {
+        signingInfo.apkContentsSigners
+      } else {
+        signingInfo?.signingCertificateHistory
+      }
+    } else {
+      @Suppress("DEPRECATION")
+      info.signatures
+    }
+
+    return (signatures ?: emptyArray()).map { signature ->
+      val digest = MessageDigest.getInstance("SHA-256")
+      digest.digest(signature.toByteArray()).joinToString("") { "%02x".format(it) }
+    }.toSet()
   }
 }

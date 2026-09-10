@@ -23,6 +23,16 @@ export async function openInstallPermissionSettings(): Promise<void> {
   return AppUpdaterModule.openInstallPermissionSettings();
 }
 
+/**
+ * `fileUri` is a file:// URI or plain path to the downloaded APK. Returns
+ * false when the APK is signed with a different key than the
+ * currently-installed app — Android will refuse an in-place install in
+ * that case regardless of what this app does.
+ */
+export async function isApkSignatureCompatible(fileUri: string): Promise<boolean> {
+  return AppUpdaterModule.isApkSignatureCompatible(fileUri);
+}
+
 /** `contentUri` must be a content:// URI (e.g. expo-file-system's `File.contentUri`). */
 export async function installApk(contentUri: string): Promise<void> {
   return AppUpdaterModule.installApk(contentUri);

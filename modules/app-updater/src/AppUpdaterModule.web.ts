@@ -16,6 +16,9 @@ class AppUpdaterModule extends NativeModule<{}> {
   openInstallPermissionSettings(): Promise<never> {
     throw new Error('AppUpdater is not supported on web.');
   }
+  isApkSignatureCompatible(): Promise<never> {
+    throw new Error('AppUpdater is not supported on web.');
+  }
   installApk(): Promise<never> {
     throw new Error('AppUpdater is not supported on web.');
   }

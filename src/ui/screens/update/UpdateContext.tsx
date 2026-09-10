@@ -5,6 +5,7 @@ import {
   canRequestPackageInstalls,
   getInstalledVersion,
   installApk,
+  isApkSignatureCompatible,
   openInstallPermissionSettings,
   sha256File,
   type InstalledVersionInfo,
@@ -20,9 +21,67 @@ export type UpdateStatus =
   | 'downloading'
   | 'verifying'
   | 'installerLaunched'
+  | 'incompatibleSignature'
   | 'error';
 
 const DOWNLOAD_FILE_NAME = 'securemessenger-update.apk';
+
+/**
+ * Transient failures (dropped connections, HTTP/2 stream resets like
+ * REFUSED_STREAM, timeouts) are common enough on real networks — and on
+ * some devices/carriers in particular — that a single failed attempt
+ * shouldn't surface an error to the user. Retried with a short exponential
+ * backoff; only the final attempt's failure is ever shown.
+ */
+const MAX_DOWNLOAD_ATTEMPTS = 4;
+const RETRY_BASE_DELAY_MS = 1000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Downloads the update APK, retrying transient failures with backoff.
+ * Every attempt — including the first — starts by discarding any
+ * leftover partial file at `destination`, so a stream reset never leaves
+ * a corrupt half-downloaded APK mistaken for a complete one (whether by
+ * this retry loop or by a subsequent app session). Does not touch
+ * SHA-256 verification or HTTPS enforcement — both still happen exactly
+ * as before, after a download completes here.
+ */
+async function downloadApkWithRetry(
+  url: string,
+  destination: File,
+  options: {
+    onProgress: (data: { bytesWritten: number; totalBytes: number }) => void;
+    onAttemptStart?: (attempt: number) => void;
+  },
+): Promise<File> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+    if (destination.exists) {
+      destination.delete();
+    }
+    options.onAttemptStart?.(attempt);
+    try {
+      return await File.downloadFileAsync(url, destination, {
+        idempotent: true,
+        onProgress: options.onProgress,
+      });
+    } catch (err) {
+      lastError = err;
+      if (attempt === MAX_DOWNLOAD_ATTEMPTS) break;
+      await delay(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+    }
+  }
+
+  if (destination.exists) {
+    destination.delete();
+  }
+  const lastMessage = lastError instanceof Error ? lastError.message : 'Unknown error';
+  throw new Error(`Could not download the update after ${MAX_DOWNLOAD_ATTEMPTS} attempts (${lastMessage}).`);
+}
 
 interface UpdateContextValue {
   status: UpdateStatus;
@@ -142,12 +201,9 @@ export function UpdateProvider({ children }: PropsWithChildren): React.JSX.Eleme
 
     try {
       const destination = new File(Paths.cache, DOWNLOAD_FILE_NAME);
-      if (destination.exists) {
-        destination.delete();
-      }
 
-      const downloaded = await File.downloadFileAsync(manifest.apkUrl, destination, {
-        idempotent: true,
+      const downloaded = await downloadApkWithRetry(manifest.apkUrl, destination, {
+        onAttemptStart: () => setProgress(0),
         onProgress: (data) => {
           if (data.totalBytes > 0) {
             setProgress(data.bytesWritten / data.totalBytes);
@@ -164,6 +220,20 @@ export function UpdateProvider({ children }: PropsWithChildren): React.JSX.Eleme
         return;
       }
 
+      // A verified-correct APK can still be signed with a different key
+      // than what's already installed (e.g. a production signing-key
+      // migration) — Android's installer would refuse it in place. Detect
+      // that here, before ever launching the installer, so the app can
+      // explain the real reason instead of the user hitting an
+      // unexplained platform error. Never attempts to work around it: no
+      // auto-uninstall, no bypassing signature verification.
+      const signatureCompatible = await isApkSignatureCompatible(downloaded.uri);
+      if (!signatureCompatible) {
+        downloaded.delete();
+        setStatus('incompatibleSignature');
+        return;
+      }
+
       const contentUri = downloaded.contentUri;
       await installApk(contentUri);
       // The Android installer UI has launched, but nothing has actually
@@ -175,6 +245,21 @@ export function UpdateProvider({ children }: PropsWithChildren): React.JSX.Eleme
       // the real versionCode from PackageManager.
       setStatus('installerLaunched');
     } catch (err) {
+      // Diagnostic only — does not affect the download, retry, SHA-256
+      // verification, HTTPS validation, signing check, or install flow
+      // above, all of which are unchanged. Exists because the app itself
+      // otherwise never records anything beyond `err.message` (what the
+      // UI already shows), which isn't enough to tell a network failure
+      // apart from e.g. a native-module mismatch. `apkUrl` is a public
+      // GitHub Releases URL, not a secret; nothing else here carries
+      // tokens or credentials.
+      console.error('[update] startUpdate failed', {
+        apkUrl: manifest.apkUrl,
+        name: err instanceof Error ? err.name : typeof err,
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+        cause: err instanceof Error ? err.cause : undefined,
+      });
       setStatus('error');
       setError(err instanceof Error ? err.message : 'Could not download the update.');
     }

@@ -115,6 +115,24 @@ export function UpdateSheet({ visible, onClose }: UpdateSheetProps): React.JSX.E
           </>
         )}
 
+        {status === 'incompatibleSignature' && (
+          <>
+            <AppText variant="title">Manual reinstall required</AppText>
+            <AppText variant="body" color="secondary" style={styles.spaced}>
+              {manifest && installedVersion
+                ? `SecureMessenger v${manifest.versionName} is signed with a new production signing key. Android won't install it in place over v${installedVersion.versionName}, which was signed with the old key — this is a platform security protection, not an app bug.`
+                : "This update is signed with a new production key that Android won't install in place over the version on this device — a platform security protection, not an app bug."}
+            </AppText>
+            <AppText variant="body" color="secondary" style={styles.spaced}>
+              To move to this version, back up anything you want to keep, then uninstall and reinstall
+              SecureMessenger yourself. We will never uninstall the app or delete your data automatically.
+            </AppText>
+            <View style={styles.action}>
+              <Button label="Close" variant="secondary" onPress={onClose} fullWidth />
+            </View>
+          </>
+        )}
+
         {status === 'error' && (
           <>
             <AppText variant="title">{needsInstallPermission ? 'Permission needed' : "Couldn't update"}</AppText>
