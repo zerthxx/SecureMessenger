@@ -26,6 +26,15 @@ export class RateLimitExceededError extends Error {
   }
 }
 
+/**
+ * Test-only: buckets are module-level state shared across test cases,
+ * so a suite asserting on counters must start from a known-empty map.
+ * Not referenced by any production code path.
+ */
+export function __resetRateLimitsForTest(): void {
+  buckets.clear();
+}
+
 export function checkRateLimit(key: string, max: number, windowMs: number): void {
   const now = Date.now();
   const existing = buckets.get(key);

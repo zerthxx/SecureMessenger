@@ -1,9 +1,28 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 
+import { isProduction } from '../config/env.js';
 import { checkRateLimit, RateLimitExceededError } from '../lib/rateLimit.js';
 import type { Context } from './context.js';
 
-const t = initTRPC.context<Context>().create();
+const t = initTRPC.context<Context>().create({
+  // Audit fix: without an errorFormatter, tRPC's default behavior sends
+  // any *unexpected* thrown error's raw `.message` straight to the
+  // client when it isn't already a deliberately-thrown TRPCError (e.g. a
+  // Postgres constraint violation or driver error would leak internal
+  // detail — table/column names, driver internals — to the mobile app).
+  // Every deliberate error path in this codebase already throws a
+  // crafted TRPCError with a safe message, so this only ever replaces
+  // the message on the truly-unhandled-exception path, and only in
+  // production — local/dev keeps the real message for debugging. The
+  // full original error is still logged server-side via app.ts's
+  // top-level onError regardless of what the client receives here.
+  errorFormatter({ shape, error }) {
+    if (isProduction && error.code === 'INTERNAL_SERVER_ERROR') {
+      return { ...shape, message: 'Something went wrong. Please try again.' };
+    }
+    return shape;
+  },
+});
 
 export const router = t.router;
 export const publicProcedure = t.procedure;

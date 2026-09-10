@@ -12,6 +12,20 @@ import { enforceRateLimit, protectedProcedure, router } from '../trpc.js';
  * the caller already had). Returns public profile fields only (id,
  * username, displayName) — nothing from `devices`/`deviceKeyPackages`.
  */
+/**
+ * Audit fix: without escaping, a caller's raw query could contain LIKE
+ * wildcard characters (`%`, `_`) that change match breadth rather than
+ * meaning what the user typed literally — e.g. searching "a_b" would
+ * also match "axb". Not a security issue (drizzle already parameterizes
+ * the value, so this was never SQL-injectable), just incorrect search
+ * semantics. Postgres's default LIKE/ILIKE escape character is `\`, so
+ * escaping backslash itself first, then the two wildcard characters, is
+ * sufficient with no ESCAPE clause needed.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
 export const usersRouter = router({
   search: protectedProcedure.input(z.object({ query: z.string().trim().min(1).max(32) })).query(async ({ ctx, input }) => {
     // Read-only, but still a user-enumeration primitive — bounded
@@ -19,7 +33,7 @@ export const usersRouter = router({
     // scripted username scan.
     enforceRateLimit(`users:search:device:${ctx.device.id}`, 30, 60 * 1000);
 
-    const needle = normalizeUsername(input.query);
+    const needle = escapeLikePattern(normalizeUsername(input.query));
     const rows = await ctx.db
       .select({ id: users.id, username: users.username, displayName: users.displayName })
       .from(users)

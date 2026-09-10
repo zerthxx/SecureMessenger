@@ -64,6 +64,15 @@ async function issueSession(db: typeof Db, userId: string, deviceId: string) {
 export const authRouter = router({
   /** Live availability check used by the Username step while the user types. */
   checkUsername: publicProcedure.input(z.object({ username: usernameField })).query(async ({ ctx, input }) => {
+    // Bounds scripted username-availability probing. The limit is
+    // deliberately generous because the signup screen calls this as
+    // 500ms-debounced typeahead and disables "Continue" until it
+    // answers, so a tight bound here blocks real signups rather than
+    // attackers — while this was combined with a mis-set trustProxy
+    // (every client sharing one bucket) it could halt registration
+    // globally. Enumeration value is low: usernames are public by
+    // design and already searchable via `users.search`.
+    enforceRateLimit(`checkUsername:ip:${ctx.req.ip}`, 120, 5 * 60 * 1000);
     const format = validateUsernameFormat(input.username);
     if (!format.valid) {
       return { available: false, reason: format.reason };

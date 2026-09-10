@@ -152,22 +152,39 @@ export const e2eeRouter = router({
       enforceRateLimit(`e2ee:consumeKeyPackage:device:${ctx.device.id}`, 30, 5 * 60 * 1000);
       await assertCallerDeviceActive(ctx);
 
-      const [row] = await ctx.db
-        .select({ id: deviceKeyPackages.id, publicKeyPackage: deviceKeyPackages.publicKeyPackage })
-        .from(deviceKeyPackages)
-        .innerJoin(devices, eq(devices.id, deviceKeyPackages.deviceId))
-        .where(and(eq(deviceKeyPackages.deviceId, input.targetDeviceId), isNull(devices.revokedAt)))
-        .orderBy(asc(deviceKeyPackages.createdAt))
-        .limit(1);
+      // Audit fix: this was previously a SELECT then a separate DELETE.
+      // Two concurrent consumeKeyPackage calls for the same
+      // targetDeviceId (e.g. two people starting a conversation with the
+      // same target at once, or a client retrying) could both SELECT the
+      // same "unconsumed" row before either DELETEd it, handing out the
+      // identical one-time KeyPackage twice — violating the single-use
+      // invariant this endpoint's own doc comment above requires.
+      // Locking the candidate row FOR UPDATE inside a transaction (with
+      // SKIP LOCKED so a second concurrent caller finds no available row
+      // instead of blocking on the first) makes select-then-delete
+      // atomic with respect to other callers — the same class of fix
+      // `createConversation` above already uses for its own concurrent
+      // request race, just row-level instead of an advisory lock since
+      // there's a concrete row to lock here.
+      return ctx.db.transaction(async (tx) => {
+        const [row] = await tx
+          .select({ id: deviceKeyPackages.id, publicKeyPackage: deviceKeyPackages.publicKeyPackage })
+          .from(deviceKeyPackages)
+          .innerJoin(devices, eq(devices.id, deviceKeyPackages.deviceId))
+          .where(and(eq(deviceKeyPackages.deviceId, input.targetDeviceId), isNull(devices.revokedAt)))
+          .orderBy(asc(deviceKeyPackages.createdAt))
+          .limit(1)
+          .for('update', { of: deviceKeyPackages, skipLocked: true });
 
-      if (!row) {
-        return { keyPackage: null };
-      }
+        if (!row) {
+          return { keyPackage: null };
+        }
 
-      await ctx.db.delete(deviceKeyPackages).where(eq(deviceKeyPackages.id, row.id));
+        await tx.delete(deviceKeyPackages).where(eq(deviceKeyPackages.id, row.id));
 
-      ctx.log.info({ targetDeviceId: input.targetDeviceId }, 'key package consumed');
-      return { keyPackage: row.publicKeyPackage.toString('base64') };
+        ctx.log.info({ targetDeviceId: input.targetDeviceId }, 'key package consumed');
+        return { keyPackage: row.publicKeyPackage.toString('base64') };
+      });
     }),
 
   /**
