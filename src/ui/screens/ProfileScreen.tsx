@@ -6,14 +6,12 @@ import { useRouter } from 'expo-router';
 import { useTheme } from '@/ui/theme';
 import { AppText, Avatar, Card, ConfirmModal, Divider, ListRow } from '@/ui/components';
 import { useAuth } from './auth';
-import { useChat } from '@/ui/screens/chat';
 
 export function ProfileScreen(): React.JSX.Element {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const { conversations } = useChat();
   const [signOutVisible, setSignOutVisible] = useState(false);
 
   const displayName = user?.displayName ?? '';
@@ -27,14 +25,6 @@ export function ProfileScreen(): React.JSX.Element {
       router.replace('/welcome');
     }
   };
-
-  // Groups and Stories have no backend yet (see e2ee router / schema) —
-  // 0 is the real count, not a placeholder, until those features exist.
-  const stats = [
-    { label: 'Chats', value: conversations.length },
-    { label: 'Groups', value: 0 },
-    { label: 'Stories', value: 0 },
-  ];
 
   return (
     <ScrollView
@@ -52,31 +42,17 @@ export function ProfileScreen(): React.JSX.Element {
         </AppText>
       </View>
 
-      <Card style={styles.statsCard}>
-        {stats.map((stat, index) => (
-          <View key={stat.label} style={styles.statItemWrap}>
-            <View style={styles.statItem}>
-              <AppText variant="title">{stat.value}</AppText>
-              <AppText variant="caption" color="secondary">
-                {stat.label}
-              </AppText>
-            </View>
-            {index < stats.length - 1 ? <View style={[styles.statDivider, { backgroundColor: theme.colors.border }]} /> : null}
-          </View>
-        ))}
-      </Card>
-
       <Card padded={false} style={styles.menuCard}>
         <View style={styles.rowPadding}>
-          <ListRow icon="shield-checkmark-outline" label="Privacy & Security" onPress={() => router.push('/settings')} />
+          <ListRow icon="shield-checkmark-outline" label="Privacy & Security" onPress={() => router.push('/settings/privacy')} />
         </View>
         <Divider inset={60} />
         <View style={styles.rowPadding}>
-          <ListRow icon="notifications-outline" label="Notifications" onPress={() => router.push('/settings')} />
+          <ListRow icon="notifications-outline" label="Notifications" onPress={() => router.push('/settings/notifications')} />
         </View>
         <Divider inset={60} />
         <View style={styles.rowPadding}>
-          <ListRow icon="color-palette-outline" label="Appearance" onPress={() => router.push('/settings')} />
+          <ListRow icon="color-palette-outline" label="Appearance" onPress={() => router.push('/settings/appearance')} />
         </View>
         <Divider inset={60} />
         <View style={styles.rowPadding}>
@@ -86,7 +62,7 @@ export function ProfileScreen(): React.JSX.Element {
 
       <Card padded={false} style={styles.menuCard}>
         <View style={styles.rowPadding}>
-          <ListRow icon="help-circle-outline" label="Help & feedback" onPress={() => {}} />
+          <ListRow icon="help-circle-outline" label="Help & feedback" onPress={() => router.push('/settings/help')} />
         </View>
         <Divider inset={60} />
         <View style={styles.rowPadding}>
@@ -118,23 +94,6 @@ const styles = StyleSheet.create({
   },
   name: {
     marginTop: 14,
-  },
-  statsCard: {
-    flexDirection: 'row',
-  },
-  statItemWrap: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  statItem: {
-    flex: 1,
-    alignItems: 'center',
-    gap: 2,
-  },
-  statDivider: {
-    width: StyleSheet.hairlineWidth,
-    height: '70%',
   },
   menuCard: {
     paddingVertical: 4,

@@ -1,4 +1,5 @@
-import { and, ilike, ne } from 'drizzle-orm';
+import { TRPCError } from '@trpc/server';
+import { and, eq, ilike, ne } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { users } from '../../db/schema.js';
@@ -41,4 +42,35 @@ export const usersRouter = router({
       .limit(20);
     return rows;
   }),
+
+  /**
+   * Updates the caller's own public profile. The display name is the only
+   * user-editable profile field — the username is the account's lookup key
+   * and can't change. Same length rule as registration (auth.register).
+   */
+  updateProfile: protectedProcedure
+    .input(
+      z.object({
+        displayName: z
+          .string()
+          .trim()
+          .min(1, 'Display name cannot be empty.')
+          .max(50, 'Display name must be 50 characters or fewer.'),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      enforceRateLimit(`users:updateProfile:user:${ctx.user.id}`, 20, 10 * 60 * 1000);
+
+      const [user] = await ctx.db
+        .update(users)
+        .set({ displayName: input.displayName, updatedAt: new Date() })
+        .where(eq(users.id, ctx.user.id))
+        .returning({ id: users.id, username: users.username, displayName: users.displayName });
+
+      if (!user) {
+        throw new TRPCError({ code: 'UNAUTHORIZED' });
+      }
+      ctx.log.info({ userId: user.id }, 'profile updated');
+      return { user };
+    }),
 });

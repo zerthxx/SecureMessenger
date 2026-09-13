@@ -37,8 +37,10 @@ import {
   upsertConversation,
   type MessageRow,
 } from '@/infrastructure/storage/messageStore';
+import { presentNewMessageNotification } from '@/infrastructure/notifications/pushNotifications';
 import { persistRecording, readAudioBytes, writeDownloadedAudio } from '@/infrastructure/storage/voiceFiles';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
+import { useNotifications } from '@/ui/screens/settings/NotificationsProvider';
 
 const KEY_PACKAGE_BATCH_SIZE = 20;
 const CONVERSATIONS_POLL_MS = 6000;
@@ -152,6 +154,14 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   // Bumped after any local-store write so screens reading getMessages()
   // re-render — the SQLite store itself has no subscription mechanism.
   const [messagesVersion, setMessagesVersion] = useState(0);
+
+  // Read inside pollConversation without widening its dependencies. Messages
+  // created before this session started are never announced, so opening the
+  // app (or a first sync after reinstall) doesn't replay old notifications.
+  const { shouldPresentLocally } = useNotifications();
+  const notifyContextRef = useRef({ shouldPresentLocally, conversations, sessionStartedAt: Date.now() });
+  notifyContextRef.current.shouldPresentLocally = shouldPresentLocally;
+  notifyContextRef.current.conversations = conversations;
 
   useEffect(() => {
     initMessageStore();
@@ -361,6 +371,16 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
             createdAt: row.createdAt,
             localCreatedAt: row.createdAt,
           });
+
+          const notify = notifyContextRef.current;
+          if (Date.parse(row.createdAt) >= notify.sessionStartedAt && notify.shouldPresentLocally()) {
+            const conversation = notify.conversations.find((c) => c.id === conversationId);
+            presentNewMessageNotification({
+              conversationId,
+              title: conversation?.otherDisplayName ?? 'SecureMessenger',
+              body: voiceEnvelope ? 'Voice message' : 'New message',
+            }).catch(() => {});
+          }
         } catch {
           // Tampered/invalid ciphertext, wrong epoch, or any other
           // authentication failure. Never fall back to displaying raw

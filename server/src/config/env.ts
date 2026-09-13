@@ -32,6 +32,11 @@ const envSchema = z.object({
   // for the accepted values and why this is expressed as a trusted-CIDR
   // list rather than a hop count.
   TRUST_PROXY: z.string().optional(),
+  // Firebase service account key (the whole JSON file as one string) used
+  // to send push notifications through FCM. Optional: without it the server
+  // still stores device push tokens but delivers no pushes — see
+  // lib/pushDelivery.ts and the `notifications.status` procedure.
+  FCM_SERVICE_ACCOUNT_JSON: z.string().optional(),
 });
 
 function loadEnv() {

@@ -219,7 +219,7 @@ export const authRouter = router({
   logout: protectedProcedure.mutation(async ({ ctx }) => {
     await ctx.db
       .update(devices)
-      .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null })
+      .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null, pushToken: null })
       .where(and(eq(devices.id, ctx.device.id), isNull(devices.revokedAt)));
 
     return { success: true as const };
@@ -228,7 +228,7 @@ export const authRouter = router({
   logoutAllDevices: protectedProcedure.mutation(async ({ ctx }) => {
     const result = await ctx.db
       .update(devices)
-      .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null })
+      .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null, pushToken: null })
       .where(and(eq(devices.userId, ctx.user.id), isNull(devices.revokedAt)))
       .returning({ id: devices.id });
 
@@ -266,7 +266,7 @@ export const authRouter = router({
       // session unable to refresh once its short-lived access token expired.
       await ctx.db
         .update(devices)
-        .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null })
+        .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null, pushToken: null })
         .where(and(eq(devices.userId, user.id), isNull(devices.revokedAt), ne(devices.id, ctx.device.id)));
 
       ctx.log.info({ userId: user.id }, 'password changed');
@@ -344,7 +344,7 @@ export const authRouter = router({
         // session, and the account owner logs back in fresh.
         await ctx.db
           .update(devices)
-          .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null })
+          .set({ revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null, pushToken: null })
           .where(and(eq(devices.userId, verified.userId), isNull(devices.revokedAt)));
 
         ctx.log.info({ userId: verified.userId }, 'password reset via recovery code');

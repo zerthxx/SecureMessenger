@@ -4,6 +4,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
 import { conversationMembers, conversations, deviceKeyPackages, devices, messages, users } from '../../db/schema.js';
+import { notifyNewMessage } from '../../lib/pushDelivery.js';
 import type { Context } from '../context.js';
 import { enforceRateLimit, protectedProcedure, router } from '../trpc.js';
 
@@ -353,6 +354,13 @@ export const e2eeRouter = router({
 
       if (!message) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to store message.' });
+      }
+
+      if (input.messageType === 'application') {
+        // Not awaited: a slow or unavailable push provider must never fail or delay the send itself.
+        notifyNewMessage({ db: ctx.db, log: ctx.log, conversationId: input.conversationId, senderUserId: ctx.user.id }).catch((err) =>
+          ctx.log.warn({ err }, 'push notification fan-out failed'),
+        );
       }
 
       return { messageId: message.id };

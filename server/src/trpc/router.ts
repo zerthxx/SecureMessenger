@@ -3,6 +3,7 @@ import type { inferRouterInputs, inferRouterOutputs } from '@trpc/server';
 import { router } from './trpc.js';
 import { authRouter } from './routers/auth.js';
 import { e2eeRouter } from './routers/e2ee.js';
+import { notificationsRouter } from './routers/notifications.js';
 import { systemRouter } from './routers/system.js';
 import { usersRouter } from './routers/users.js';
 
@@ -11,6 +12,7 @@ export const appRouter = router({
   auth: authRouter,
   e2ee: e2eeRouter,
   users: usersRouter,
+  notifications: notificationsRouter,
 });
 
 export type AppRouter = typeof appRouter;

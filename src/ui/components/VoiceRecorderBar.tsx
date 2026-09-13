@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 import { useTheme } from '@/ui/theme';
 import { AppText } from './AppText';
@@ -14,12 +15,17 @@ export function formatClockDuration(ms: number): string {
 
 export interface VoiceRecorderBarProps {
   elapsedMs: number;
-  onCancel: () => void;
-  onStop: () => void;
+  /** Leftward drag distance (px) while holding the record button. */
+  slideDistance?: number;
+  /** Drag distance at which the recording is cancelled. */
+  cancelDistance?: number;
+  /** Explicit controls, shown instead of the slide hint when recording was started by a screen reader. */
+  onCancel?: () => void;
+  onSend?: () => void;
 }
 
-/** Replaces the composer's text row while actively recording — indicator, elapsed time, cancel, stop. */
-export function VoiceRecorderBar({ elapsedMs, onCancel, onStop }: VoiceRecorderBarProps): React.JSX.Element {
+/** Replaces the composer's text field while recording — pulsing indicator, elapsed time, and slide-to-cancel hint (or explicit buttons for screen-reader users). */
+export function VoiceRecorderBar({ elapsedMs, slideDistance = 0, cancelDistance = 110, onCancel, onSend }: VoiceRecorderBarProps): React.JSX.Element {
   const theme = useTheme();
   const pulse = useRef(new Animated.Value(1)).current;
 
@@ -34,16 +40,32 @@ export function VoiceRecorderBar({ elapsedMs, onCancel, onStop }: VoiceRecorderB
     return () => loop.stop();
   }, [pulse]);
 
+  const progress = Math.min(1, slideDistance / cancelDistance);
+  const nearCancel = progress > 0.75;
+
   return (
-    <View style={[styles.container, { backgroundColor: theme.colors.background, borderTopColor: theme.colors.border }]}>
-      <IconButton name="trash-outline" accessibilityLabel="Cancel recording" onPress={onCancel} />
-      <View style={styles.center}>
-        <Animated.View style={[styles.dot, { backgroundColor: theme.colors.danger, opacity: pulse }]} />
-        <AppText variant="body" color="secondary">
-          Recording… {formatClockDuration(elapsedMs)}
-        </AppText>
-      </View>
-      <IconButton name="stop-circle" accessibilityLabel="Stop recording" onPress={onStop} variant="filled" />
+    <View
+      style={[styles.container, { backgroundColor: theme.colors.surfaceElevated, borderRadius: theme.radius.md }]}
+      accessibilityLiveRegion="polite"
+      accessibilityLabel={`Recording voice message, ${formatClockDuration(elapsedMs)}`}
+    >
+      <Animated.View style={[styles.dot, { backgroundColor: theme.colors.danger, opacity: pulse }]} />
+      <AppText variant="bodyMedium" style={styles.timer}>
+        {formatClockDuration(elapsedMs)}
+      </AppText>
+      {onCancel && onSend ? (
+        <View style={styles.buttons}>
+          <IconButton name="trash-outline" accessibilityLabel="Cancel recording" onPress={onCancel} />
+          <IconButton name="send" accessibilityLabel="Send voice message" onPress={onSend} variant="filled" />
+        </View>
+      ) : (
+        <View style={[styles.hint, { opacity: 1 - progress * 0.6, transform: [{ translateX: -slideDistance * 0.4 }] }]}>
+          <Ionicons name="chevron-back" size={16} color={nearCancel ? theme.colors.danger : theme.colors.textSecondary} />
+          <AppText variant="body" color={nearCancel ? 'danger' : 'secondary'}>
+            Slide to cancel
+          </AppText>
+        </View>
+      )}
     </View>
   );
 }
@@ -52,22 +74,29 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  center: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    gap: 10,
+    minHeight: 44,
+    paddingHorizontal: 14,
   },
   dot: {
     width: 10,
     height: 10,
     borderRadius: 5,
+  },
+  timer: {
+    minWidth: 40,
+  },
+  hint: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+  },
+  buttons: {
+    flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
   },
 });

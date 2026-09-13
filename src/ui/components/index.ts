@@ -22,5 +22,4 @@ export { StepDots } from './StepDots';
 export { StoryRing, type StoryRingProps } from './StoryRing';
 export { TextField, type TextFieldProps } from './TextField';
 export { TopBar, type TopBarProps } from './TopBar';
-export { VoicePreviewBar, type VoicePreviewBarProps } from './VoicePreviewBar';
 export { VoiceRecorderBar, type VoiceRecorderBarProps, formatClockDuration } from './VoiceRecorderBar';

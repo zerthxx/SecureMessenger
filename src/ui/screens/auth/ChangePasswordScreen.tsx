@@ -8,6 +8,11 @@ import { AppText, Button, PasswordStrengthMeter, TextField, TopBar } from '@/ui/
 import { getApiErrorMessage } from '@/infrastructure/network/trpcClient';
 import { useAuth } from './AuthContext';
 
+const MIN_PASSWORD_LENGTH = 8; // server: auth.changePassword passwordField
+const MAX_PASSWORD_LENGTH = 200;
+
+type FieldErrors = { current?: string; next?: string; confirm?: string; form?: string };
+
 export function ChangePasswordScreen(): React.JSX.Element {
   const theme = useTheme();
   const router = useRouter();
@@ -16,31 +21,45 @@ export function ChangePasswordScreen(): React.JSX.Element {
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
   const [hidden, setHidden] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<FieldErrors>({});
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  const goBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/settings');
+    }
+  };
+
+  const validate = (): FieldErrors => {
+    const found: FieldErrors = {};
+    if (!current) found.current = 'Enter your current password.';
+    if (next.length < MIN_PASSWORD_LENGTH) {
+      found.next = `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
+    } else if (next.length > MAX_PASSWORD_LENGTH) {
+      found.next = `Use ${MAX_PASSWORD_LENGTH} characters or fewer.`;
+    } else if (current && next === current) {
+      found.next = 'Choose a password different from your current one.';
+    }
+    if (!found.next && confirm !== next) found.confirm = "Passwords don't match.";
+    return found;
+  };
+
   const handleSave = async () => {
-    if (!current.trim()) {
-      setError('Enter your current password.');
-      return;
-    }
-    if (next.length < 8) {
-      setError('New password must be at least 8 characters.');
-      return;
-    }
-    if (next !== confirm) {
-      setError("New passwords don't match.");
-      return;
-    }
-    setError(null);
+    const found = validate();
+    setErrors(found);
+    if (Object.keys(found).length > 0) return;
+
     setLoading(true);
     try {
       await changePassword({ currentPassword: current, newPassword: next });
       setSuccess(true);
-      setTimeout(() => router.back(), 1000);
+      setTimeout(goBack, 1800);
     } catch (err) {
-      setError(getApiErrorMessage(err, 'Could not update your password.'));
+      const message = getApiErrorMessage(err, 'Could not update your password. Please try again.');
+      setErrors(message === 'Current password is incorrect.' ? { current: message } : { form: message });
     } finally {
       setLoading(false);
     }
@@ -49,13 +68,16 @@ export function ChangePasswordScreen(): React.JSX.Element {
   return (
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
-        <TopBar title="Change passphrase" onBack={() => router.back()} />
+        <TopBar title="Change password" onBack={goBack} />
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           {success ? (
             <View style={styles.success}>
               <Ionicons name="checkmark-circle" size={40} color={theme.colors.success} />
               <AppText variant="bodyMedium" style={{ color: theme.colors.success }}>
-                Passphrase updated
+                Password updated
+              </AppText>
+              <AppText variant="body" color="secondary" style={styles.successDetail}>
+                Any other devices signed in to your account have been signed out.
               </AppText>
             </View>
           ) : (
@@ -66,35 +88,45 @@ export function ChangePasswordScreen(): React.JSX.Element {
                 trailingIcon={hidden ? 'eye-outline' : 'eye-off-outline'}
                 onTrailingIconPress={() => setHidden((v) => !v)}
                 secureTextEntry={hidden}
+                autoCapitalize="none"
                 value={current}
                 onChangeText={(text) => {
                   setCurrent(text);
-                  setError(null);
+                  setErrors((e) => ({ ...e, current: undefined, form: undefined }));
                 }}
+                errorText={errors.current}
               />
               <TextField
                 label="New password"
                 leadingIcon="lock-closed-outline"
                 secureTextEntry={hidden}
+                autoCapitalize="none"
                 value={next}
                 onChangeText={(text) => {
                   setNext(text);
-                  setError(null);
+                  setErrors((e) => ({ ...e, next: undefined, confirm: undefined, form: undefined }));
                 }}
+                errorText={errors.next}
               />
               <PasswordStrengthMeter password={next} />
               <TextField
                 label="Confirm new password"
                 leadingIcon="lock-closed-outline"
                 secureTextEntry={hidden}
+                autoCapitalize="none"
                 value={confirm}
                 onChangeText={(text) => {
                   setConfirm(text);
-                  setError(null);
+                  setErrors((e) => ({ ...e, confirm: undefined, form: undefined }));
                 }}
-                errorText={error ?? undefined}
+                errorText={errors.confirm}
               />
-              <Button label="Save changes" size="lg" fullWidth loading={loading} onPress={handleSave} />
+              {errors.form ? (
+                <AppText variant="body" color="danger">
+                  {errors.form}
+                </AppText>
+              ) : null}
+              <Button label="Change password" size="lg" fullWidth loading={loading} onPress={handleSave} />
             </>
           )}
         </ScrollView>
@@ -117,5 +149,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     paddingTop: 40,
+  },
+  successDetail: {
+    textAlign: 'center',
   },
 });

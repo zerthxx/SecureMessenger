@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import type { AuthUser } from '@/domain/entities';
 import { getDeviceInfo } from '@/infrastructure/network/deviceInfo';
-import { authApi, getApiErrorMessage, setAccessToken, setAuthRefreshHandler } from '@/infrastructure/network/trpcClient';
+import { authApi, getApiErrorMessage, setAccessToken, setAuthRefreshHandler, usersApi } from '@/infrastructure/network/trpcClient';
 import { clearSession, loadSession, saveSession, type StoredSession } from '@/infrastructure/storage/secureAuthStorage';
 
 type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
@@ -31,6 +31,8 @@ interface AuthContextValue {
   logout(): Promise<void>;
   logoutAllDevices(): Promise<void>;
   changePassword(input: { currentPassword: string; newPassword: string }): Promise<void>;
+  /** Saves the display name on the server, then updates both in-memory auth state and the stored session so the change survives an app restart. */
+  updateProfile(input: { displayName: string }): Promise<void>;
   verifyRecoveryCode(input: { username: string; recoveryCode: string }): Promise<{ recoveryToken: string }>;
   resetPassword(input: { recoveryToken: string; newPassword: string }): Promise<{ newRecoveryCode: string[] }>;
   checkUsername(username: string): Promise<{ available: boolean; reason?: string }>;
@@ -201,6 +203,19 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
 
       async changePassword({ currentPassword, newPassword }) {
         await authApi.changePassword({ currentPassword, newPassword });
+      },
+
+      async updateProfile({ displayName }) {
+        const { user: saved } = await usersApi.updateProfile({ displayName });
+        const nextUser: AuthUser = { id: saved.id, username: saved.username, displayName: saved.displayName };
+        userRef.current = nextUser;
+        setUser(nextUser);
+        // The display name shown after an app restart comes from the stored
+        // session (see the bootstrap effect), so it has to be saved there too.
+        const currentSession = sessionRef.current;
+        if (currentSession) {
+          await saveSession(toStoredSession(nextUser, currentSession));
+        }
       },
 
       async verifyRecoveryCode({ username, recoveryCode }) {

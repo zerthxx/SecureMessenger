@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Vibration, View } from 'react-native';
 
 import { stopVoicePlayback } from '@/infrastructure/media/voicePlayer';
-import { deleteVoiceFile } from '@/infrastructure/storage/voiceFiles';
 import { useVoiceRecorder, type VoiceRecordingResult } from '@/ui/hooks/useVoiceRecorder';
 import { useTheme } from '@/ui/theme';
 import { AppText } from './AppText';
+import { HoldToRecordButton, SLIDE_TO_CANCEL_DISTANCE } from './HoldToRecordButton';
 import { IconButton } from './IconButton';
 import { TextField } from './TextField';
-import { VoicePreviewBar } from './VoicePreviewBar';
 import { VoiceRecorderBar } from './VoiceRecorderBar';
 
 export interface MessageComposerProps {
@@ -18,40 +17,74 @@ export interface MessageComposerProps {
   onSendVoice: (uri: string, durationMs: number) => void;
 }
 
+const HINT_DURATION_MS = 2500;
+
 export function MessageComposer({ disabled, placeholder, onSend, onSendVoice }: MessageComposerProps): React.JSX.Element {
   const theme = useTheme();
   const [text, setText] = useState('');
-  // A recording that has been stopped but not yet sent or discarded —
-  // its presence is what puts the composer into the "preview" state.
-  // Never auto-sent: only `handleSendPreview` (an explicit tap) does that.
-  const [preview, setPreview] = useState<VoiceRecordingResult | null>(null);
+  const [slideDistance, setSlideDistance] = useState(0);
+  const [hint, setHint] = useState<string | null>(null);
+  // Recording started from a screen reader (no hold gesture) — shows explicit Cancel/Send buttons.
+  const [screenReaderRecording, setScreenReaderRecording] = useState(false);
+  // True while a finger is holding the record button. A press that ends
+  // while the recorder is still starting flips this back before start()
+  // resolves, so that recording is discarded instead of running on.
+  const holdingRef = useRef(false);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onSendVoiceRef = useRef(onSendVoice);
+  onSendVoiceRef.current = onSendVoice;
 
-  const handleMaxDurationReached = useCallback((result: VoiceRecordingResult | null) => {
-    if (result) setPreview(result);
+  const showHint = useCallback((message: string) => {
+    setHint(message);
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = setTimeout(() => setHint(null), HINT_DURATION_MS);
   }, []);
+
+  const sendRecording = useCallback(
+    (result: VoiceRecordingResult | null) => {
+      if (result) {
+        stopVoicePlayback();
+        onSendVoiceRef.current(result.uri, result.durationMs);
+      } else {
+        showHint('Hold the microphone a little longer to record.');
+      }
+    },
+    [showHint],
+  );
+
+  // Reaching the 2-minute limit sends what was recorded, the same as releasing.
+  const handleMaxDurationReached = useCallback(
+    (result: VoiceRecordingResult | null) => {
+      holdingRef.current = false;
+      setScreenReaderRecording(false);
+      setSlideDistance(0);
+      sendRecording(result);
+    },
+    [sendRecording],
+  );
 
   const recorder = useVoiceRecorder(handleMaxDurationReached);
 
-  // Never leave the preview player's native resource open once this
-  // composer goes away (navigating out of the conversation, logout).
+  // Never leave a player or timer running once the composer goes away
+  // (navigating out of the conversation, logout). The recorder hook itself
+  // stops and discards an in-progress recording on unmount.
   useEffect(() => {
     return () => {
       stopVoicePlayback();
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
     };
   }, []);
 
   const trimmed = text.trim();
   const canSend = trimmed.length > 0 && !disabled;
+  const recording = recorder.phase === 'recording';
 
   // Audit fix: a rapid double-tap on Send could fire two onPress events
   // before React re-renders with the cleared text — both calls would see
   // the same (still non-empty) `trimmed`/`canSend` from the same render
   // and both call onSend, producing a duplicate sent message. This ref
   // closes that window: it's set the instant the first tap is accepted,
-  // and only cleared once a re-render actually reflects the emptied
-  // text, mirroring the in-flight-lock pattern already used elsewhere in
-  // this codebase (e.g. NewConversationScreen's `startingId`,
-  // ChatContext's `startConversationInFlightRef`).
+  // and only cleared once a re-render actually reflects the emptied text.
   const sendingRef = useRef(false);
   useEffect(() => {
     sendingRef.current = false;
@@ -65,48 +98,86 @@ export function MessageComposer({ disabled, placeholder, onSend, onSendVoice }: 
     onSend(value);
   }
 
-  async function handleMicPress() {
-    if (disabled) return;
+  /** Starts recording if the microphone is available; returns whether recording actually began. */
+  async function beginRecording(): Promise<boolean> {
+    if (disabled) return false;
+    if (recorder.phase === 'permission_blocked') {
+      Linking.openSettings();
+      return false;
+    }
+    const result = await recorder.start();
+    switch (result) {
+      case 'recording':
+        Vibration.vibrate(15);
+        return true;
+      case 'permission_granted':
+        showHint('Microphone ready. Press and hold to record.');
+        return false;
+      case 'failed':
+        showHint('Couldn’t start recording. Please try again.');
+        return false;
+      default:
+        return false; // denied/blocked are shown in the permission banner; busy is ignored
+    }
+  }
+
+  async function handleHoldStart() {
+    holdingRef.current = true;
+    setSlideDistance(0);
+    setHint(null);
+    const started = await beginRecording();
+    if (started && !holdingRef.current) {
+      // The press ended (or was cancelled) while the recorder was starting.
+      recorder.cancel();
+    }
+  }
+
+  async function handleRelease() {
+    holdingRef.current = false;
+    setSlideDistance(0);
+    sendRecording(await recorder.stop());
+  }
+
+  function handleCancel() {
+    holdingRef.current = false;
+    setSlideDistance(0);
+    recorder.cancel();
+    Vibration.vibrate(30);
+    showHint('Voice message cancelled.');
+  }
+
+  function handleTap() {
     if (recorder.phase === 'permission_blocked') {
       Linking.openSettings();
       return;
     }
-    await recorder.start();
+    showHint('Press and hold to record a voice message.');
   }
 
-  async function handleStopRecording() {
-    const result = await recorder.stop();
-    if (result) setPreview(result);
+  async function handleAccessibilityActivate() {
+    if (recording) {
+      setScreenReaderRecording(false);
+      sendRecording(await recorder.stop());
+      return;
+    }
+    if (await beginRecording()) setScreenReaderRecording(true);
   }
 
-  function handleDeletePreview() {
-    if (preview) deleteVoiceFile(preview.uri);
-    stopVoicePlayback();
-    setPreview(null);
+  function handleScreenReaderCancel() {
+    setScreenReaderRecording(false);
+    recorder.cancel();
   }
 
-  function handleSendPreview() {
-    if (!preview) return;
-    stopVoicePlayback();
-    onSendVoice(preview.uri, preview.durationMs);
-    setPreview(null);
-  }
-
-  if (preview) {
-    return (
-      <VoicePreviewBar uri={preview.uri} durationMs={preview.durationMs} onDelete={handleDeletePreview} onSend={handleSendPreview} />
-    );
-  }
-
-  if (recorder.phase === 'recording') {
-    return <VoiceRecorderBar elapsedMs={recorder.elapsedMs} onCancel={recorder.cancel} onStop={handleStopRecording} />;
+  async function handleScreenReaderSend() {
+    setScreenReaderRecording(false);
+    sendRecording(await recorder.stop());
   }
 
   const permissionMessage =
     recorder.phase === 'permission_blocked'
       ? 'Microphone access is blocked. Tap to open Settings and allow it.'
       : recorder.phase === 'permission_denied'
-        ? 'Microphone access is needed to record a voice message. Tap the microphone to try again.'
+        ? 'Microphone access is needed to record a voice message. Press and hold the microphone to try again.'
         : null;
 
   return (
@@ -114,29 +185,54 @@ export function MessageComposer({ disabled, placeholder, onSend, onSendVoice }: 
       {permissionMessage ? (
         <Pressable
           onPress={recorder.phase === 'permission_blocked' ? () => Linking.openSettings() : undefined}
-          style={[styles.permissionBanner, { backgroundColor: theme.colors.surfaceElevated, borderTopColor: theme.colors.border }]}
+          style={[styles.banner, { backgroundColor: theme.colors.surfaceElevated, borderTopColor: theme.colors.border }]}
         >
           <AppText variant="caption" color="secondary">
             {permissionMessage}
           </AppText>
         </Pressable>
+      ) : hint ? (
+        <View style={[styles.banner, { backgroundColor: theme.colors.surfaceElevated, borderTopColor: theme.colors.border }]}>
+          <AppText variant="caption" color="secondary" accessibilityLiveRegion="polite">
+            {hint}
+          </AppText>
+        </View>
       ) : null}
       <View style={[styles.container, { backgroundColor: theme.colors.background, borderTopColor: theme.colors.border }]}>
         <View style={styles.field}>
-          <TextField
-            value={text}
-            onChangeText={setText}
-            placeholder={disabled ? 'Waiting for encryption to be ready…' : (placeholder ?? 'Message')}
-            editable={!disabled}
-            multiline
-            returnKeyType="default"
-            accessibilityLabel="Message input"
-          />
+          {recording ? (
+            <VoiceRecorderBar
+              elapsedMs={recorder.elapsedMs}
+              slideDistance={slideDistance}
+              cancelDistance={SLIDE_TO_CANCEL_DISTANCE}
+              onCancel={screenReaderRecording ? handleScreenReaderCancel : undefined}
+              onSend={screenReaderRecording ? handleScreenReaderSend : undefined}
+            />
+          ) : (
+            <TextField
+              value={text}
+              onChangeText={setText}
+              placeholder={disabled ? 'Waiting for encryption to be ready…' : (placeholder ?? 'Message')}
+              editable={!disabled}
+              multiline
+              returnKeyType="default"
+              accessibilityLabel="Message input"
+            />
+          )}
         </View>
-        {trimmed.length > 0 ? (
+        {trimmed.length > 0 && !recording ? (
           <IconButton name="send" accessibilityLabel="Send message" onPress={handleSend} variant={canSend ? 'filled' : 'plain'} />
         ) : (
-          <IconButton name="mic" accessibilityLabel="Record voice message" onPress={handleMicPress} variant="plain" />
+          <HoldToRecordButton
+            disabled={disabled}
+            recording={recording}
+            onHoldStart={handleHoldStart}
+            onRelease={handleRelease}
+            onCancel={handleCancel}
+            onSlide={setSlideDistance}
+            onTap={handleTap}
+            onAccessibilityActivate={handleAccessibilityActivate}
+          />
         )}
       </View>
     </View>
@@ -155,7 +251,7 @@ const styles = StyleSheet.create({
   field: {
     flex: 1,
   },
-  permissionBanner: {
+  banner: {
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderTopWidth: StyleSheet.hairlineWidth,

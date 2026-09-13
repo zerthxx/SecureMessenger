@@ -261,6 +261,24 @@ export const e2eeApi = {
 export const usersApi = {
   search: (input: Inputs['users']['search']) =>
     withAuthRetry(() => untypedClient.query('users.search', input)) as Promise<Outputs['users']['search']>,
+
+  updateProfile: (input: Inputs['users']['updateProfile']) =>
+    withAuthRetry(() => untypedClient.mutation('users.updateProfile', input)) as Promise<Outputs['users']['updateProfile']>,
+};
+
+export const notificationsApi = {
+  status: () =>
+    withAuthRetry(() => untypedClient.query('notifications.status')) as Promise<Outputs['notifications']['status']>,
+
+  registerPushToken: (input: Inputs['notifications']['registerPushToken']) =>
+    withAuthRetry(() => untypedClient.mutation('notifications.registerPushToken', input)) as Promise<
+      Outputs['notifications']['registerPushToken']
+    >,
+
+  unregisterPushToken: () =>
+    withAuthRetry(() => untypedClient.mutation('notifications.unregisterPushToken')) as Promise<
+      Outputs['notifications']['unregisterPushToken']
+    >,
 };
 
 /** Turns a tRPC error, or a plain Error thrown by local orchestration code, into a message safe to show directly in the UI. */

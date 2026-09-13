@@ -4,6 +4,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import type { Message } from '@/domain/entities';
 import { getApiErrorMessage } from '@/infrastructure/network/trpcClient';
+import { setActiveConversation } from '@/infrastructure/notifications/pushNotifications';
 import { useTheme } from '@/ui/theme';
 import { EmptyState, LoadingState, MessageBubble, MessageComposer, TopBar } from '@/ui/components';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
@@ -41,6 +42,13 @@ export function ConversationScreen(): React.JSX.Element {
   const listRef = useRef<FlatList<Message>>(null);
 
   const conversation = useMemo(() => conversations.find((c) => c.id === id), [conversations, id]);
+
+  // Messages for the chat that's on screen shouldn't also raise notifications.
+  useEffect(() => {
+    if (!id) return;
+    setActiveConversation(id);
+    return () => setActiveConversation(null);
+  }, [id]);
   const messages = id ? getMessages(id) : [];
   // FlatList is `inverted` so new messages stay pinned to the bottom
   // without manual scroll management — inverted expects newest-first.
