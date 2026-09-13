@@ -31,20 +31,22 @@ export interface UpdateManifest {
   mandatory: boolean;
 }
 
-// v0.5.0 — apkUrl/sha256 point at the actual signed release APK uploaded
-// to GitHub Releases (zerthxx/SecureMessenger, tag v0.5.0); sha256 was
-// computed locally from the same APK before upload and independently
-// confirmed to match the re-downloaded asset's own digest. Signed with a
-// NEW production keystore (the original was confirmed unrecoverable) —
-// see keystores/KEYSTORE_INFO.md — so this is not an in-place update for
-// devices with a pre-v0.5.0 production APK installed; those installs
-// must uninstall and reinstall fresh. Update this whole object (and bump
-// versionCode) the next time a signed release APK is cut and uploaded.
+// v0.6.0 — apkUrl/sha256 point at the actual signed release APK uploaded
+// to GitHub Releases (zerthxx/SecureMessenger, tag v0.6.0); sha256 was
+// computed locally from the same APK and independently confirmed against
+// both the GitHub asset's recorded digest and a re-download of the
+// published asset. Signed with the same production keystore as v0.5.0
+// (see keystores/KEYSTORE_INFO.md), so unlike the v0.5.0 cut this *is* a
+// normal in-place update for devices already running v0.5.0. Devices
+// still on a pre-v0.5.0 production APK (signed with the original, lost
+// key) remain unable to update in place and must uninstall and reinstall.
+// Update this whole object (and bump versionCode) the next time a signed
+// release APK is cut and uploaded.
 export const CURRENT_UPDATE_MANIFEST: UpdateManifest = {
-  versionName: '0.5.0',
-  versionCode: 5,
-  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.5.0/app-release.apk',
-  sha256: '7f147e284c0676aeb3cb3e038ec86c05626eaadcaf6607b2cc793009c8d10f3b',
-  releaseNotes: 'Various fixes and improvements under the hood.',
+  versionName: '0.6.0',
+  versionCode: 6,
+  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.6.0/app-release.apk',
+  sha256: '9ff8f267064ab0116d0c4046737dfe74ff7aea8a89f00e528e5bda2ca8975bbf',
+  releaseNotes: 'Adds encrypted voice messages, plus security and reliability fixes.',
   mandatory: false,
 };
