@@ -3,7 +3,8 @@ import helmet from '@fastify/helmet';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import fastify from 'fastify';
 
-import { env, trustProxyDisabledBehindProxy, trustProxyOption } from './config/env.js';
+import { env, isProduction, trustProxyDisabledBehindProxy, trustProxyOption } from './config/env.js';
+import { apkDownloadRoutes } from './http/apkDownload.js';
 import { healthRoutes } from './http/health.js';
 import { mediaRoutes } from './http/media.js';
 import { updateManifestRoutes } from './http/updateManifest.js';
@@ -40,6 +41,7 @@ export function buildApp() {
 
   app.register(healthRoutes);
   app.register(updateManifestRoutes);
+  app.register(apkDownloadRoutes, { prewarm: isProduction });
   app.register(mediaRoutes, { prefix: '/media' });
 
   app.register(fastifyTRPCPlugin, {
