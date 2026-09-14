@@ -1,5 +1,6 @@
 import {
   customType,
+  date,
   index,
   integer,
   jsonb,
@@ -31,6 +32,9 @@ export const memberRoleEnum = pgEnum('member_role', ['member', 'admin']);
 // encrypted chat message. Both are opaque bytes to the server either
 // way — this only affects delivery/routing, never decryption.
 export const messageTypeEnum = pgEnum('message_type', ['application', 'welcome']);
+// Who besides the owner may see a birthday: nobody, day+month only, or the
+// full date. Enforced by the public-profile projection in lib/profile.ts.
+export const birthdayVisibilityEnum = pgEnum('birthday_visibility', ['hidden', 'month_day', 'full']);
 
 /**
  * A person. Never stores a plaintext password or recovery code — only
@@ -52,6 +56,20 @@ export const users = pgTable('users', {
   // or restored by the recovery flow. Public only; the private half never
   // leaves the device that created it.
   identitySigningPublicKey: bytea('identity_signing_public_key'),
+  // Public profile fields (see lib/profile.ts). All optional: null means
+  // "not set". `bio` is sanitized server-side before it is stored.
+  bio: varchar('bio', { length: 160 }),
+  // A calendar date, never a formatted string. Other users only ever see
+  // the parts `birthdayVisibility` allows.
+  birthday: date('birthday', { mode: 'string' }),
+  birthdayVisibility: birthdayVisibilityEnum('birthday_visibility').notNull().default('month_day'),
+  // Id of the current profile photo blob in MEDIA_STORAGE_DIR/avatars (see
+  // http/avatars.ts). The image bytes never live in the database; a new
+  // upload gets a new id, which is also what clients cache by.
+  avatarId: uuid('avatar_id'),
+  // Settings → Devices → "Automatically terminate old sessions": a device
+  // unused for longer than this many days is signed out by the server.
+  sessionTtlDays: integer('session_ttl_days').notNull().default(180),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -84,6 +102,16 @@ export const devices = pgTable(
     // proving this device belongs to the account (cross-signing).
     mlsCredentialPublicKey: bytea('mls_credential_public_key'),
     identityCrossSignature: bytea('identity_cross_signature'),
+    // Session metadata for Settings → Devices (see lib/sessions.ts). All
+    // optional: rows created before these existed show "Unknown". Purely
+    // descriptive, reported by the app — never used to authenticate.
+    model: varchar('model', { length: 100 }),
+    osVersion: varchar('os_version', { length: 50 }),
+    appVersion: varchar('app_version', { length: 50 }),
+    // The network the session was last active from, truncated BEFORE it is
+    // stored (IPv4 /24, IPv6 /48 — e.g. "203.0.113.*"): enough to recognize
+    // a network, never a full address.
+    lastIpPrefix: varchar('last_ip_prefix', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),

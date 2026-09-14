@@ -6,6 +6,7 @@ import type { Chat, Conversation } from '@/domain/entities';
 import { useChat } from '@/ui/screens/chat';
 import { useTheme } from '@/ui/theme';
 import { ChatRow, Divider, EmptyState, ErrorState, IconButton, TextField, TopBar } from '@/ui/components';
+import { UserAvatar, useOpenUserProfile } from '@/ui/screens/profile';
 
 // See canNavigateRef's doc comment below — 400ms comfortably covers the
 // native slide transition duration (typically ~250-300ms) with margin.
@@ -25,6 +26,7 @@ function formatTimestamp(iso: string | null): string {
 function toChat(conversation: Conversation): Chat {
   return {
     id: conversation.id,
+    participantId: conversation.otherUserId,
     participantName: conversation.otherDisplayName,
     // No presence system in this phase's scope — see the Phase 6 report's remaining limitations.
     participantOnline: false,
@@ -42,6 +44,7 @@ export function ChatsScreen(): React.JSX.Element {
   const theme = useTheme();
   const router = useRouter();
   const { conversations, e2eeError, retryE2eeSetup, refreshConversations } = useChat();
+  const openUserProfile = useOpenUserProfile();
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [retryingE2ee, setRetryingE2ee] = useState(false);
@@ -83,6 +86,22 @@ export function ChatsScreen(): React.JSX.Element {
     const needle = query.trim().toLowerCase();
     return mapped.filter((chat) => chat.participantName.toLowerCase().includes(needle));
   }, [conversations, query]);
+
+  /** The participant's photo; tapping it opens their profile (tapping the rest of the row opens the chat). */
+  function renderAvatar(chat: Chat) {
+    const participantId = chat.participantId;
+    if (!participantId) return undefined;
+    return (
+      <UserAvatar
+        userId={participantId}
+        name={chat.participantName}
+        onPress={() => {
+          if (!canNavigateRef.current) return;
+          openUserProfile(participantId);
+        }}
+      />
+    );
+  }
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -127,6 +146,7 @@ export function ChatsScreen(): React.JSX.Element {
               <View style={styles.rowPadding}>
                 <ChatRow
                   chat={item}
+                  avatar={renderAvatar(item)}
                   onPress={() => {
                     if (!canNavigateRef.current) return;
                     router.push({ pathname: '/(home)/chats/[id]', params: { id: item.id } } as unknown as Href);

@@ -9,6 +9,8 @@
  * fan-out (a later phase) makes the API horizontally scaled — moving
  * this to Redis is that phase's responsibility, not a surprise.
  */
+import type { FastifyReply } from 'fastify';
+
 interface Bucket {
   count: number;
   resetAt: number;
@@ -52,4 +54,22 @@ export function checkRateLimit(key: string, max: number, windowMs: number): void
   }
 
   existing.count += 1;
+}
+
+/**
+ * For plain Fastify routes, which have no tRPC-style error mapping: sends a
+ * 429 and returns true when `key` is over its limit, so the handler can
+ * `return` straight away.
+ */
+export function replyIfRateLimited(reply: FastifyReply, key: string, max: number, windowMs: number): boolean {
+  try {
+    checkRateLimit(key, max, windowMs);
+    return false;
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      reply.status(429).send({ error: 'Too many attempts. Please try again shortly.' });
+      return true;
+    }
+    throw err;
+  }
 }

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { env } from '../config/env.js';
@@ -49,3 +49,44 @@ export async function readMediaObject(mediaId: string): Promise<Buffer | null> {
     throw err;
   }
 }
+
+/*
+ * Profile photos, kept in the same storage directory under `avatars/`.
+ * Unlike voice blobs these are plain (already resized) images — profiles
+ * aren't end-to-end encrypted — one file per upload id. The database only
+ * holds the id (`users.avatar_id`); the bytes never go into Postgres.
+ */
+
+function avatarPath(avatarId: string): string {
+  assertValidMediaId(avatarId);
+  return path.join(env.MEDIA_STORAGE_DIR, 'avatars', `${avatarId}.img`);
+}
+
+let avatarDirReady: Promise<void> | null = null;
+
+function ensureAvatarDir(): Promise<void> {
+  if (!avatarDirReady) {
+    avatarDirReady = mkdir(path.join(env.MEDIA_STORAGE_DIR, 'avatars'), { recursive: true }).then(() => undefined);
+  }
+  return avatarDirReady;
+}
+
+export const avatarBlobStorage = {
+  async save(avatarId: string, bytes: Buffer): Promise<void> {
+    await ensureAvatarDir();
+    await writeFile(avatarPath(avatarId), bytes);
+  },
+
+  async read(avatarId: string): Promise<Buffer | null> {
+    try {
+      return await readFile(avatarPath(avatarId));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  },
+
+  async remove(avatarId: string): Promise<void> {
+    await rm(avatarPath(avatarId), { force: true });
+  },
+};

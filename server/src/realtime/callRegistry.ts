@@ -238,6 +238,22 @@ export class CallRegistry {
     }
   }
 
+  /**
+   * The device's session was terminated: end its calls right away. Unlike a
+   * dropped connection there is no reconnect grace period — the device can't
+   * come back. The other side is told the connection was lost.
+   */
+  deviceRevoked(deviceId: string): void {
+    for (const call of [...this.calls.values()]) {
+      if (call.callerDeviceId === deviceId) {
+        const reason = call.state === 'ringing' ? 'cancelled' : 'connection_lost';
+        this.end(call, { caller: reason, callee: reason }, deviceId);
+      } else if (call.calleeDeviceId === deviceId) {
+        this.end(call, { caller: 'connection_lost', callee: 'connection_lost' }, deviceId);
+      }
+    }
+  }
+
   deviceConnected(deviceId: string): void {
     for (const call of this.calls.values()) {
       const handle = call.graceTimers.get(deviceId);

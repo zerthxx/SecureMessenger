@@ -4,25 +4,8 @@
 // binary body. This module reuses that file's access-token/refresh state
 // instead of duplicating it, so both clients always agree on "who is
 // authenticated right now."
-import { API_BASE_URL, getAccessTokenForRequest, refreshAccessTokenOnce } from './trpcClient';
-
-async function authorizedFetch(url: string, init: RequestInit): Promise<Response> {
-  const token = getAccessTokenForRequest();
-  const headers = new Headers(init.headers);
-  if (token) headers.set('authorization', `Bearer ${token}`);
-
-  let response = await fetch(url, { ...init, headers });
-  if (response.status === 401) {
-    const refreshed = await refreshAccessTokenOnce();
-    if (refreshed) {
-      const retryToken = getAccessTokenForRequest();
-      const retryHeaders = new Headers(init.headers);
-      if (retryToken) retryHeaders.set('authorization', `Bearer ${retryToken}`);
-      response = await fetch(url, { ...init, headers: retryHeaders });
-    }
-  }
-  return response;
-}
+import { authorizedFetch } from './authorizedFetch';
+import { API_BASE_URL } from './trpcClient';
 
 export async function uploadVoiceBlob(conversationId: string, bytes: Uint8Array): Promise<{ mediaId: string }> {
   const response = await authorizedFetch(`${API_BASE_URL}/media/${conversationId}`, {

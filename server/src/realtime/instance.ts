@@ -3,9 +3,12 @@ import type { FastifyBaseLogger } from 'fastify';
 import { decodeJwt } from 'jose';
 
 import { db } from '../db/client.js';
-import { conversationMembers, conversations, devices } from '../db/schema.js';
-import type { RealtimeRouteOptions } from '../http/realtime.js';
-import { notifyCallEnded, notifyIncomingCall } from '../lib/pushDelivery.js';
+import { conversationMembers, conversations } from '../db/schema.js';
+import { CLOSE_SESSION_REVOKED, type RealtimeRouteOptions } from '../http/realtime.js';
+import { announceNewLogin } from '../lib/newLogin.js';
+import { notifyCallEnded, notifyIncomingCall, notifyNewLogin } from '../lib/pushDelivery.js';
+import { createDbSessionStore } from '../lib/sessionStore.js';
+import { SessionManager } from '../lib/sessions.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import { CallRegistry } from './callRegistry.js';
 import { RealtimeHub } from './hub.js';
@@ -54,16 +57,38 @@ export const callRegistry = new CallRegistry({
   },
 });
 
+/**
+ * Every signed-in session's server-side lifecycle (lib/sessions.ts): the
+ * revocation check used by the API, media and realtime routes, and — when a
+ * session ends — closing its realtime socket and ending its calls right away.
+ */
+export const sessions = new SessionManager(
+  createDbSessionStore(db),
+  {
+    isOnline: (deviceId) => realtimeHub.isDeviceConnected(deviceId),
+    onRevoked: (ended) => {
+      for (const { deviceId } of ended) {
+        realtimeHub.disconnectDevice(deviceId, CLOSE_SESSION_REVOKED, 'session terminated');
+        callRegistry.deviceRevoked(deviceId);
+      }
+    },
+    onNewLogin: (userId, notice) => {
+      announceNewLogin({
+        userId,
+        notice,
+        toUser: (id, event, options) => realtimeHub.toUser(id, event, options),
+        push: (excludeDeviceIds) => notifyNewLogin({ db, log, userId, excludeDeviceIds, notice }),
+      }).catch((err: unknown) => log.warn({ err }, 'new login notification failed'));
+    },
+  },
+  { warn: (obj, msg) => log.warn(obj, msg) },
+);
+
 async function authenticate(token: string) {
   const verified = await verifyAccessToken(token);
   if (!verified) return null;
   const { exp } = decodeJwt(token); // already signature-verified above
   return { ...verified, expiresAt: (exp ?? 0) * 1000 };
-}
-
-async function isDeviceActive(deviceId: string): Promise<boolean> {
-  const [device] = await db.select({ revokedAt: devices.revokedAt }).from(devices).where(eq(devices.id, deviceId)).limit(1);
-  return !!device && !device.revokedAt;
 }
 
 /** Calls are 1:1: only a member of a direct conversation can call, and only its other member. */
@@ -80,7 +105,14 @@ async function findCallee(conversationId: string, userId: string): Promise<strin
 }
 
 export function createRealtimeRouteOptions(): RealtimeRouteOptions {
-  return { hub: realtimeHub, calls: callRegistry, authenticate, isDeviceActive, findCallee };
+  return {
+    hub: realtimeHub,
+    calls: callRegistry,
+    authenticate,
+    isDeviceActive: (deviceId, userId) => sessions.isActive(userId, deviceId),
+    isDeviceRevoked: (deviceId) => sessions.isKnownRevoked(deviceId),
+    findCallee,
+  };
 }
 
 /**

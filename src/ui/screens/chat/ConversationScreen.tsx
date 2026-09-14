@@ -8,6 +8,7 @@ import { setActiveConversation } from '@/infrastructure/notifications/pushNotifi
 import { realtime } from '@/infrastructure/realtime/realtimeClient';
 import { useTheme } from '@/ui/theme';
 import { EmptyState, IconButton, LoadingState, MessageBubble, MessageComposer, TopBar } from '@/ui/components';
+import { UserAvatar, useOpenUserProfile } from '@/ui/screens/profile';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
 import { useCall } from '@/ui/screens/call';
 import { useChat } from './ChatContext';
@@ -24,6 +25,7 @@ function keyExtractor(message: Message): string {
 export function ConversationScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const openUserProfile = useOpenUserProfile();
   const theme = useTheme();
   const { deviceId } = useAuth();
   const {
@@ -197,6 +199,11 @@ export function ConversationScreen(): React.JSX.Element {
           title={conversation?.otherDisplayName ?? 'Chat'}
           subtitle={conversation?.groupJoined ? 'Encrypted' : e2eeError ? 'Encryption unavailable' : 'Setting up encryption…'}
           onBack={() => router.back()}
+          leading={
+            conversation ? <UserAvatar userId={conversation.otherUserId} name={conversation.otherDisplayName} size="sm" /> : undefined
+          }
+          onTitlePress={conversation ? () => openUserProfile(conversation.otherUserId) : undefined}
+          titleAccessibilityLabel={conversation ? `View ${conversation.otherDisplayName}'s profile` : undefined}
           rightSlot={
             conversation?.groupJoined ? (
               <View style={styles.callButtons}>

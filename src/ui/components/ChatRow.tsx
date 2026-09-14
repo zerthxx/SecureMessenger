@@ -7,7 +7,16 @@ import { AppText } from './AppText';
 import { Avatar } from './Avatar';
 import { Badge } from './Badge';
 
-export function ChatRow({ chat, onPress }: { chat: Chat; onPress?: () => void }): React.JSX.Element {
+export function ChatRow({
+  chat,
+  onPress,
+  avatar,
+}: {
+  chat: Chat;
+  onPress?: () => void;
+  /** Replaces the default initials avatar, e.g. with a photo that opens the participant's profile. */
+  avatar?: React.ReactNode;
+}): React.JSX.Element {
   const theme = useTheme();
   const unread = chat.unreadCount > 0;
 
@@ -18,7 +27,7 @@ export function ChatRow({ chat, onPress }: { chat: Chat; onPress?: () => void })
       accessibilityLabel={`Chat with ${chat.participantName}`}
       style={({ pressed }) => [styles.container, pressed ? { opacity: 0.6 } : null]}
     >
-      <Avatar name={chat.participantName} online={chat.participantOnline} />
+      {avatar ?? <Avatar name={chat.participantName} online={chat.participantOnline} />}
       <View style={styles.textWrap}>
         <View style={styles.topLine}>
           <AppText variant="bodyMedium" numberOfLines={1} style={styles.name}>

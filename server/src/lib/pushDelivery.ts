@@ -7,6 +7,7 @@ import { conversationMembers, devices } from '../db/schema.js';
 import {
   buildCallEndedPush,
   buildIncomingCallPush,
+  buildNewLoginPush,
   buildNewMessagePush,
   createFcmClient,
   parseServiceAccount,
@@ -14,6 +15,7 @@ import {
   type FcmDataMessage,
   type FcmMessage,
 } from './fcm.js';
+import { newLoginPushText, type NewLoginNotice } from './newLogin.js';
 
 type Db = typeof database;
 type Log = Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
@@ -187,4 +189,28 @@ export async function notifyCallEnded({
   if (!fcm) return;
   const recipients = await unconnectedDevices(db, userId, excludeDeviceIds);
   await deliver(fcm, db, log, recipients, (token) => buildCallEndedPush(token, { callId, reason }));
+}
+
+/** "New login detected" to the account's signed-in devices that the realtime alert didn't reach (and never the new one). */
+export async function notifyNewLogin({
+  db,
+  log,
+  userId,
+  excludeDeviceIds,
+  notice,
+}: {
+  db: Db;
+  log: Log;
+  userId: string;
+  excludeDeviceIds: string[];
+  notice: NewLoginNotice;
+}): Promise<void> {
+  const fcm = getClient();
+  if (!fcm) {
+    reportConfigError(log);
+    return;
+  }
+  const recipients = await unconnectedDevices(db, userId, excludeDeviceIds);
+  const text = newLoginPushText(notice);
+  await deliver(fcm, db, log, recipients, (token) => buildNewLoginPush(token, text, notice.sessionId));
 }

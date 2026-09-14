@@ -5,9 +5,10 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { db } from '../db/client.js';
 import { conversationMembers, devices, mediaObjects } from '../db/schema.js';
-import { checkRateLimit, RateLimitExceededError } from '../lib/rateLimit.js';
+import { replyIfRateLimited } from '../lib/rateLimit.js';
 import { readMediaObject, saveMediaObject } from '../lib/mediaStorage.js';
 import { verifyAccessToken } from '../lib/tokens.js';
+import { sessions } from '../realtime/instance.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -26,18 +27,22 @@ interface AuthResult {
  * a good fit for tRPC's JSON transport, not because it needs different
  * auth semantics. Returns `null` (caller sends 401) rather than
  * throwing, since Fastify plain routes have no shared error-mapping
- * middleware the way tRPC procedures do.
+ * middleware the way tRPC procedures do. Also used by the profile photo
+ * routes (http/avatars.ts).
  */
-async function authenticate(req: FastifyRequest): Promise<AuthResult | null> {
+export async function authenticateMediaRequest(req: FastifyRequest): Promise<AuthResult | null> {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return null;
   const verified = await verifyAccessToken(header.slice('Bearer '.length));
   if (!verified) return null;
+  // Same terminated-session check as tRPC's protectedProcedure (lib/sessions.ts).
+  if (!(await sessions.isActive(verified.userId, verified.deviceId))) return null;
+  sessions.touch(verified.deviceId, req.ip);
   return verified;
 }
 
 /** Same revoked-device check as e2ee.ts's `assertCallerDeviceActive`, applied to the one mutating route (upload). */
-async function isDeviceActive(deviceId: string): Promise<boolean> {
+export async function isDeviceActive(deviceId: string): Promise<boolean> {
   const [device] = await db.select({ revokedAt: devices.revokedAt }).from(devices).where(eq(devices.id, deviceId)).limit(1);
   return !!device && !device.revokedAt;
 }
@@ -50,19 +55,6 @@ async function isConversationMember(conversationId: string, userId: string): Pro
     .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId)))
     .limit(1);
   return !!membership;
-}
-
-function rateLimited(reply: FastifyReply, key: string, max: number, windowMs: number): boolean {
-  try {
-    checkRateLimit(key, max, windowMs);
-    return false;
-  } catch (err) {
-    if (err instanceof RateLimitExceededError) {
-      reply.status(429).send({ error: 'Too many attempts. Please try again shortly.' });
-      return true;
-    }
-    throw err;
-  }
 }
 
 /**
@@ -85,13 +77,13 @@ export async function mediaRoutes(app: FastifyInstance) {
   );
 
   app.post<{ Params: { conversationId: string } }>('/:conversationId', async (req, reply) => {
-    const auth = await authenticate(req);
+    const auth = await authenticateMediaRequest(req);
     if (!auth) return reply.status(401).send({ error: 'Authentication required' });
 
     const { conversationId } = req.params;
     if (!UUID_RE.test(conversationId)) return reply.status(400).send({ error: 'Invalid conversationId' });
 
-    if (rateLimited(reply, `media:upload:device:${auth.deviceId}`, 30, 60 * 1000)) return;
+    if (replyIfRateLimited(reply, `media:upload:device:${auth.deviceId}`, 30, 60 * 1000)) return;
 
     if (!(await isDeviceActive(auth.deviceId))) {
       return reply.status(401).send({ error: 'This device has been signed out.' });
@@ -118,7 +110,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   });
 
   app.get<{ Params: { conversationId: string; mediaId: string } }>('/:conversationId/:mediaId', async (req, reply) => {
-    const auth = await authenticate(req);
+    const auth = await authenticateMediaRequest(req);
     if (!auth) return reply.status(401).send({ error: 'Authentication required' });
 
     const { conversationId, mediaId } = req.params;
@@ -126,7 +118,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid id' });
     }
 
-    if (rateLimited(reply, `media:download:device:${auth.deviceId}`, 120, 60 * 1000)) return;
+    if (replyIfRateLimited(reply, `media:download:device:${auth.deviceId}`, 120, 60 * 1000)) return;
 
     if (!(await isConversationMember(conversationId, auth.userId))) {
       return reply.status(403).send({ error: 'Not a member of this conversation.' });

@@ -67,6 +67,12 @@ export type ServerEvent =
   | { type: 'ready' }
   | { type: 'pong' }
   | { type: 'auth.refreshed' }
+  /**
+   * Another device just signed in to this account. Describes the new session
+   * (its id, device label, platform, coarse location if known, time) so the
+   * app can alert the user — never any credential.
+   */
+  | { type: 'security.new_login'; sessionId: string; deviceName: string; platform: string; location: string | null; at: string }
   /** Content-free hint that a conversation has new rows to sync. */
   | { type: 'conversation.updated'; conversationId: string }
   | {

@@ -36,6 +36,20 @@
       "when": 1786536746707,
       "tag": "0004_deep_forge",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789378981445,
+      "tag": "0005_profile_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789381720992,
+      "tag": "0006_device_sessions",
+      "breakpoints": true
     }
   ]
 }

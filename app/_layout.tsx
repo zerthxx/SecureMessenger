@@ -6,6 +6,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ThemeProvider, useTheme } from '@/ui/theme';
 import { AuthProvider, ChatProvider, UpdateDialog, UpdateIndicator, UpdateProvider } from '@/ui/screens';
+import { SessionEndedNotice } from '@/ui/screens/auth/SessionEndedNotice';
 import { ActiveCallBanner, CallProvider } from '@/ui/screens/call';
 import { NotificationsProvider, SettingsPreferencesProvider } from '@/ui/screens/settings';
 
@@ -35,9 +36,13 @@ function RootNavigator(): React.JSX.Element {
         <Stack.Screen name="settings/blocked-contacts" options={CARD} />
         <Stack.Screen name="settings/legal" options={CARD} />
         <Stack.Screen name="settings/help" options={CARD} />
+        <Stack.Screen name="settings/devices" options={CARD} />
+        <Stack.Screen name="settings/session/[id]" options={CARD} />
+        <Stack.Screen name="user/[id]" options={CARD} />
         <Stack.Screen name="change-password" options={CARD} />
         <Stack.Screen name="call" options={{ presentation: 'fullScreenModal', animation: 'fade', gestureEnabled: false }} />
       </Stack>
+      <SessionEndedNotice />
     </>
   );
 }

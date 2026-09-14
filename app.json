@@ -3,7 +3,7 @@
     "name": "Secure Messenger",
     "slug": "zerth",
     "scheme": "securemessenger",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "com.securemessenger.app",
-      "versionCode": 7,
+      "versionCode": 8,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -44,7 +44,8 @@
           "cameraPermission": "SecureMessenger uses the camera for video calls.",
           "microphonePermission": "SecureMessenger uses the microphone for voice and video calls."
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true

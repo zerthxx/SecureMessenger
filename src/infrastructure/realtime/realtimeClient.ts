@@ -17,6 +17,7 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 // Close codes sent by the server (server/src/http/realtime.ts).
 const CLOSE_REPLACED = 4000;
 const CLOSE_TOKEN_EXPIRED = 4001;
+const CLOSE_SESSION_REVOKED = 4003;
 const CLOSE_POLICY_VIOLATION = 1008;
 
 /** React Native's WebSocket accepts request headers as a third argument; the DOM typings in scope don't know that. */
@@ -168,6 +169,15 @@ class RealtimeClient {
       if (!this.wanted) return;
       if (event.code === CLOSE_REPLACED) {
         // A newer connection from this same device took over; don't fight it.
+        return;
+      }
+      if (event.code === CLOSE_SESSION_REVOKED) {
+        // This session was terminated on the server. Don't reconnect blindly:
+        // a refresh fails for a terminated session, which signs the app out
+        // (AuthContext); only a session that is somehow still valid reconnects.
+        void refreshAccessTokenOnce().then((refreshed) => {
+          if (refreshed && this.wanted && !this.socket) void this.connect();
+        });
         return;
       }
       if (event.code === CLOSE_TOKEN_EXPIRED || event.code === CLOSE_POLICY_VIOLATION) {

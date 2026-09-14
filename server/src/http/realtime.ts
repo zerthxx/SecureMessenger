@@ -18,7 +18,14 @@ export interface RealtimeRouteOptions {
   calls: CallRegistry;
   /** Verifies an access token exactly like the HTTP API does. */
   authenticate(token: string): Promise<RealtimeAuth | null>;
-  isDeviceActive(deviceId: string): Promise<boolean>;
+  /** Whether the device's session is still live (not terminated, belongs to `userId`). */
+  isDeviceActive(deviceId: string, userId: string): Promise<boolean>;
+  /**
+   * Synchronous: whether the session is already known to be terminated.
+   * Checked on every message, so signaling stops even before a terminated
+   * device's socket has finished closing.
+   */
+  isDeviceRevoked?(deviceId: string): boolean;
   /** The other member of a direct conversation that `userId` belongs to; null when `userId` isn't a member. */
   findCallee(conversationId: string, userId: string): Promise<string | null>;
   heartbeatMs?: number;
@@ -29,6 +36,8 @@ export interface RealtimeRouteOptions {
 export const CLOSE_REPLACED = 4000;
 /** The access token expired; the app refreshes it and reconnects. */
 export const CLOSE_TOKEN_EXPIRED = 4001;
+/** The session was terminated (Settings → Devices, sign-out everywhere, inactivity). The app must not reconnect. */
+export const CLOSE_SESSION_REVOKED = 4003;
 const CLOSE_POLICY_VIOLATION = 1008;
 
 const HEARTBEAT_MS = 25_000;
@@ -57,7 +66,7 @@ export async function realtimeRoutes(app: FastifyInstance, options: RealtimeRout
         if (!auth || auth.expiresAt <= now()) {
           return reply.code(401).send({ error: 'Authentication required' });
         }
-        if (!(await options.isDeviceActive(auth.deviceId))) {
+        if (!(await options.isDeviceActive(auth.deviceId, auth.userId))) {
           return reply.code(401).send({ error: 'This device has been signed out.' });
         }
         authByRequest.set(request, auth);
@@ -110,6 +119,10 @@ export async function realtimeRoutes(app: FastifyInstance, options: RealtimeRout
               socket.close(CLOSE_POLICY_VIOLATION, 'invalid token');
               return;
             }
+            if (!(await options.isDeviceActive(next.deviceId, next.userId))) {
+              socket.close(CLOSE_SESSION_REVOKED, 'session terminated');
+              return;
+            }
             clearTimeout(expiryTimer);
             expiryTimer = closeWhenTokenExpires(next.expiresAt);
             send({ type: 'auth.refreshed' });
@@ -158,6 +171,10 @@ export async function realtimeRoutes(app: FastifyInstance, options: RealtimeRout
       socket.on('message', (data: RawData, isBinary: boolean) => {
         queue = queue
           .then(async () => {
+            if (options.isDeviceRevoked?.(participant.deviceId)) {
+              socket.close(CLOSE_SESSION_REVOKED, 'session terminated');
+              return;
+            }
             if (!allow(`realtime:device:${participant.deviceId}`, 240, 10_000)) {
               send({ type: 'call.error', code: 'rate_limited' });
               return;

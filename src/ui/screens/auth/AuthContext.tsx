@@ -1,9 +1,20 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 
-import type { AuthUser } from '@/domain/entities';
-import { getDeviceInfo } from '@/infrastructure/network/deviceInfo';
-import { authApi, getApiErrorMessage, setAccessToken, setAuthRefreshHandler, usersApi } from '@/infrastructure/network/trpcClient';
+import type { AuthUser, OwnProfile, ProfileUpdate } from '@/domain/entities';
+import { deleteAvatar, uploadAvatar as uploadAvatarBytes } from '@/infrastructure/network/avatarApi';
+import { getDeviceInfo, getDeviceMetadata } from '@/infrastructure/network/deviceInfo';
+import {
+  authApi,
+  getApiErrorMessage,
+  isUnauthorized,
+  setAccessToken,
+  setAuthRefreshHandler,
+  usersApi,
+} from '@/infrastructure/network/trpcClient';
+import { primeAvatar } from '@/infrastructure/storage/avatarCache';
 import { clearSession, loadSession, saveSession, type StoredSession } from '@/infrastructure/storage/secureAuthStorage';
+import { resetSessionsStore } from '@/ui/screens/devices/sessionsStore';
+import { clearProfileCache } from '@/ui/screens/profile/profileCache';
 
 type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -31,8 +42,22 @@ interface AuthContextValue {
   logout(): Promise<void>;
   logoutAllDevices(): Promise<void>;
   changePassword(input: { currentPassword: string; newPassword: string }): Promise<void>;
-  /** Saves the display name on the server, then updates both in-memory auth state and the stored session so the change survives an app restart. */
-  updateProfile(input: { displayName: string }): Promise<void>;
+  /**
+   * Set when the server ended this device's session (terminated from another
+   * device, signed out everywhere, or inactivity) and the app signed itself
+   * out — so the UI can say why. Cleared on the next sign-in or acknowledgement.
+   */
+  signedOutReason: 'session_ended' | null;
+  acknowledgeSignedOut(): void;
+  /** The signed-in user's full profile (bio, birthday, photo). Loaded in the background after sign-in; null until then, or if that load failed. */
+  profile: OwnProfile | null;
+  /** Re-reads the profile from the server. */
+  refreshProfile(): Promise<void>;
+  /** Saves the given profile fields on the server and returns what was stored. A changed display name is also written to the stored session so it survives an app restart. */
+  updateProfile(input: ProfileUpdate): Promise<OwnProfile>;
+  /** Makes an already-resized photo the profile photo. */
+  uploadAvatar(photo: { bytes: Uint8Array; mimeType: string }): Promise<void>;
+  removeAvatar(): Promise<void>;
   verifyRecoveryCode(input: { username: string; recoveryCode: string }): Promise<{ recoveryToken: string }>;
   resetPassword(input: { recoveryToken: string; newPassword: string }): Promise<{ newRecoveryCode: string[] }>;
   checkUsername(username: string): Promise<{ available: boolean; reason?: string }>;
@@ -57,6 +82,8 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<AuthUser | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<OwnProfile | null>(null);
+  const [signedOutReason, setSignedOutReason] = useState<'session_ended' | null>(null);
   // Mirrors state into refs so callbacks below don't need `session`/`user`
   // in their dependency arrays while still reading the latest value.
   const sessionRef = useRef<Session | null>(null);
@@ -69,15 +96,21 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
     setUser(nextUser);
     setDeviceId(nextSession.deviceId);
     setStatus('authenticated');
+    setSignedOutReason(null);
   }
 
-  async function clearAuth() {
+  async function clearAuth(reason: 'session_ended' | null = null) {
     sessionRef.current = null;
     userRef.current = null;
     setAccessToken(null);
     setUser(null);
     setDeviceId(null);
+    setProfile(null);
     setStatus('unauthenticated');
+    setSignedOutReason(reason);
+    // Other users' profiles and this account's session list.
+    clearProfileCache();
+    resetSessionsStore();
     // Session/auth material only. Local conversation/message data is NOT
     // cleared here — it's owner-scoped per account in messageStore (see
     // ChatContext, which points the store at whichever account is
@@ -108,13 +141,13 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
         return;
       }
       try {
-        const result = await authApi.refresh({ refreshToken: stored.refreshToken });
+        const result = await authApi.refresh({ refreshToken: stored.refreshToken, device: getDeviceMetadata() });
         const nextUser: AuthUser = { id: stored.userId, username: stored.username, displayName: stored.displayName };
         const nextSession: Session = { ...result.session, deviceId: stored.deviceId };
         await saveSession(toStoredSession(nextUser, nextSession));
         applySession(nextUser, nextSession);
-      } catch {
-        await clearAuth();
+      } catch (err) {
+        await clearAuth(isUnauthorized(err) ? 'session_ended' : null);
       }
     })();
     // Runs once on mount only — this is an app-launch bootstrap, not a
@@ -135,12 +168,12 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
    * closure's up-to-date session, not one captured from whenever this
    * effect last ran.
    *
-   * Throws (rather than calling `clearAuth`) when there's no session to
-   * refresh or the refresh token itself is no longer valid — the caller
-   * (`withAuthRetry`) already has its own single retry of the original
-   * call, which will surface a normal 401 to whatever screen triggered
-   * it. Forcing a full sign-out from deep inside a background retry
-   * would be a much bigger behavior change than this fix calls for.
+   * Throws when there's no session to refresh or the refresh fails. When
+   * the server rejects the refresh token itself (UNAUTHORIZED), that is
+   * final — the session was terminated from Settings → Devices, by signing
+   * out everywhere, or for inactivity, and nothing can revive it — so the
+   * app is signed out too, with `signedOutReason` telling the UI why
+   * (SessionEndedNotice). Network failures stay retryable and never sign out.
    */
   const performRefresh = useCallback(async (): Promise<void> => {
     const current = sessionRef.current;
@@ -148,7 +181,15 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
     if (!current || !currentUser) {
       throw new Error('Not signed in');
     }
-    const result = await authApi.refresh({ refreshToken: current.refreshToken });
+    let result: Awaited<ReturnType<typeof authApi.refresh>>;
+    try {
+      result = await authApi.refresh({ refreshToken: current.refreshToken, device: getDeviceMetadata() });
+    } catch (err) {
+      if (isUnauthorized(err) && sessionRef.current === current) {
+        await clearAuth('session_ended');
+      }
+      throw err;
+    }
     const nextSession: Session = { ...result.session, deviceId: current.deviceId };
     await saveSession(toStoredSession(currentUser, nextSession));
     applySession(currentUser, nextSession);
@@ -159,11 +200,52 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
     return () => setAuthRefreshHandler(null);
   }, [performRefresh]);
 
+  /**
+   * Stores a profile fresh from the server. The display name shown after an
+   * app restart comes from the stored session (see the bootstrap effect), so
+   * a changed name is saved there too. Ignored if the account signed out
+   * while the request was in flight.
+   */
+  async function applyProfile(next: OwnProfile) {
+    const currentUser = userRef.current;
+    if (!currentUser || currentUser.id !== next.id) return;
+    setProfile(next);
+    if (currentUser.displayName === next.displayName) return;
+    const nextUser: AuthUser = { ...currentUser, displayName: next.displayName };
+    userRef.current = nextUser;
+    setUser(nextUser);
+    const currentSession = sessionRef.current;
+    if (currentSession) {
+      await saveSession(toStoredSession(nextUser, currentSession));
+    }
+  }
+
+  const loadProfile = useCallback(async (): Promise<void> => {
+    const { profile: loaded } = await usersApi.me();
+    await applyProfile(loaded);
+    // applyProfile only reads refs and state setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Once per signed-in account — not polled. Until it loads (or if it fails),
+  // screens fall back to the name from the stored session.
+  const signedInUserId = status === 'authenticated' ? (user?.id ?? null) : null;
+  useEffect(() => {
+    if (!signedInUserId) return;
+    loadProfile().catch(() => {});
+  }, [signedInUserId, loadProfile]);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
       user,
       deviceId,
+      profile,
+      signedOutReason,
+
+      acknowledgeSignedOut() {
+        setSignedOutReason(null);
+      },
 
       async register({ username, displayName, password }) {
         const result = await authApi.register({
@@ -205,17 +287,30 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
         await authApi.changePassword({ currentPassword, newPassword });
       },
 
-      async updateProfile({ displayName }) {
-        const { user: saved } = await usersApi.updateProfile({ displayName });
-        const nextUser: AuthUser = { id: saved.id, username: saved.username, displayName: saved.displayName };
-        userRef.current = nextUser;
-        setUser(nextUser);
-        // The display name shown after an app restart comes from the stored
-        // session (see the bootstrap effect), so it has to be saved there too.
-        const currentSession = sessionRef.current;
-        if (currentSession) {
-          await saveSession(toStoredSession(nextUser, currentSession));
+      async refreshProfile() {
+        await loadProfile();
+      },
+
+      async updateProfile(input) {
+        const { user: saved } = await usersApi.updateProfile(input);
+        await applyProfile(saved);
+        return saved;
+      },
+
+      async uploadAvatar(photo) {
+        const { avatarId } = await uploadAvatarBytes(photo);
+        // The uploader already has the bytes — never download them back.
+        primeAvatar(avatarId, photo.bytes);
+        if (profile) {
+          setProfile((current) => (current ? { ...current, avatarId } : current));
+        } else {
+          await loadProfile().catch(() => {});
         }
+      },
+
+      async removeAvatar() {
+        await deleteAvatar();
+        setProfile((current) => (current ? { ...current, avatarId: null } : current));
       },
 
       async verifyRecoveryCode({ username, recoveryCode }) {
@@ -230,7 +325,7 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
         return authApi.checkUsername({ username });
       },
     }),
-    [status, user, deviceId],
+    [status, user, deviceId, profile, signedOutReason, loadProfile],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -4,7 +4,8 @@ import { useRouter, type Href } from 'expo-router';
 
 import { getApiErrorMessage } from '@/infrastructure/network/trpcClient';
 import { useTheme } from '@/ui/theme';
-import { AppText, Avatar, Divider, EmptyState, TopBar } from '@/ui/components';
+import { AppText, Divider, EmptyState, TopBar } from '@/ui/components';
+import { UserAvatar, useOpenUserProfile } from '@/ui/screens/profile';
 import { TextField } from '@/ui/components';
 import { useChat } from './ChatContext';
 
@@ -12,12 +13,14 @@ interface UserResult {
   id: string;
   username: string;
   displayName: string;
+  avatarId: string | null;
 }
 
 export function NewConversationScreen(): React.JSX.Element {
   const theme = useTheme();
   const router = useRouter();
   const { searchUsers, startConversation } = useChat();
+  const openUserProfile = useOpenUserProfile();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<UserResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -79,7 +82,8 @@ export function NewConversationScreen(): React.JSX.Element {
             accessibilityLabel={`Start chat with ${item.displayName}`}
             style={({ pressed }) => [styles.row, pressed || startingId === item.id ? { opacity: 0.6 } : null]}
           >
-            <Avatar name={item.displayName} />
+            {/* Tapping the photo opens their profile; tapping the row starts the chat. */}
+            <UserAvatar userId={item.id} avatarId={item.avatarId} name={item.displayName} onPress={() => openUserProfile(item.id)} />
             <View style={styles.textWrap}>
               <AppText variant="bodyMedium">{item.displayName}</AppText>
               <AppText variant="caption" color="secondary">

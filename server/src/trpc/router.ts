@@ -5,6 +5,7 @@ import { authRouter } from './routers/auth.js';
 import { callsRouter } from './routers/calls.js';
 import { e2eeRouter } from './routers/e2ee.js';
 import { notificationsRouter } from './routers/notifications.js';
+import { sessionsRouter } from './routers/sessions.js';
 import { systemRouter } from './routers/system.js';
 import { usersRouter } from './routers/users.js';
 
@@ -15,6 +16,7 @@ export const appRouter = router({
   users: usersRouter,
   notifications: notificationsRouter,
   calls: callsRouter,
+  sessions: sessionsRouter,
 });
 
 export type AppRouter = typeof appRouter;

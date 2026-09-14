@@ -5,12 +5,16 @@ import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/a
 import fastify from 'fastify';
 
 import { env, isProduction, trustProxyDisabledBehindProxy, trustProxyOption } from './config/env.js';
+import { db } from './db/client.js';
 import { apkDownloadRoutes } from './http/apkDownload.js';
+import { avatarRoutes } from './http/avatars.js';
 import { healthRoutes } from './http/health.js';
-import { mediaRoutes } from './http/media.js';
+import { authenticateMediaRequest, isDeviceActive, mediaRoutes } from './http/media.js';
 import { realtimeRoutes } from './http/realtime.js';
 import { updateManifestRoutes } from './http/updateManifest.js';
 import { loggerOptions } from './lib/logger.js';
+import { avatarBlobStorage } from './lib/mediaStorage.js';
+import { createDbProfileStore } from './lib/profileStore.js';
 import { attachRealtimeLogger, createRealtimeRouteOptions } from './realtime/instance.js';
 import { createContext } from './trpc/context.js';
 import { appRouter, type AppRouter } from './trpc/router.js';
@@ -46,6 +50,13 @@ export function buildApp() {
   app.register(updateManifestRoutes);
   app.register(apkDownloadRoutes, { prewarm: isProduction });
   app.register(mediaRoutes, { prefix: '/media' });
+  app.register(avatarRoutes, {
+    prefix: '/avatars',
+    authenticate: authenticateMediaRequest,
+    isDeviceActive,
+    profiles: createDbProfileStore(db),
+    blobs: avatarBlobStorage,
+  });
 
   // Authenticated realtime channel: call signaling and "sync now" hints.
   app.register(websocket, { options: { maxPayload: 128 * 1024 } });

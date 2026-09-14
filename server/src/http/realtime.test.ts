@@ -9,7 +9,7 @@ import { __resetRateLimitsForTest } from '../lib/rateLimit.js';
 import { CallRegistry } from '../realtime/callRegistry.js';
 import { RealtimeHub } from '../realtime/hub.js';
 import type { ServerEvent } from '../realtime/protocol.js';
-import { realtimeRoutes } from './realtime.js';
+import { CLOSE_SESSION_REVOKED, realtimeRoutes } from './realtime.js';
 
 const CALL = '11111111-1111-4111-8111-111111111111';
 const CONVERSATION = '22222222-2222-4222-8222-222222222222';
@@ -52,8 +52,24 @@ function listen(socket: WebSocket) {
   };
 }
 
+/** Resolves with the close code once the server closes the socket. */
+function closeCode(socket: WebSocket): Promise<number> {
+  return new Promise((resolve) => socket.once('close', (code: number) => resolve(code)));
+}
+
 describe('realtime route', () => {
   let app: FastifyInstance;
+  let hub: RealtimeHub;
+  let calls: CallRegistry;
+  /** Sessions terminated during a test — in production, lib/sessions.ts. */
+  const revoked = new Set<string>();
+
+  /** What realtime/instance.ts does when SessionManager ends a session. */
+  function terminateSession(deviceId: string) {
+    revoked.add(deviceId);
+    hub.disconnectDevice(deviceId, CLOSE_SESSION_REVOKED, 'session terminated');
+    calls.deviceRevoked(deviceId);
+  }
   const sockets: WebSocket[] = [];
 
   async function connect(token: string) {
@@ -70,8 +86,9 @@ describe('realtime route', () => {
 
   beforeEach(async () => {
     __resetRateLimitsForTest();
-    const hub = new RealtimeHub();
-    const calls = new CallRegistry({
+    revoked.clear();
+    hub = new RealtimeHub();
+    calls = new CallRegistry({
       toDevice: (deviceId, event) => hub.toDevice(deviceId, event),
       toUser: (userId, event, options) => hub.toUser(userId, event, options),
       wakeCallee: () => {},
@@ -86,7 +103,8 @@ describe('realtime route', () => {
         const account = ACCOUNTS[token];
         return account ? { ...account, expiresAt: Date.now() + 60_000 } : null;
       },
-      isDeviceActive: async (deviceId) => deviceId !== 'revoked-device',
+      isDeviceActive: async (deviceId) => deviceId !== 'revoked-device' && !revoked.has(deviceId),
+      isDeviceRevoked: (deviceId) => revoked.has(deviceId),
       findCallee: async (conversationId, userId) => {
         if (conversationId !== CONVERSATION) return null;
         return userId === 'user-alice' ? 'user-bob' : userId === 'user-bob' ? 'user-alice' : null;
@@ -104,6 +122,42 @@ describe('realtime route', () => {
     await assert.rejects(app.injectWS('/realtime', { headers: {} }), /401/);
     await assert.rejects(app.injectWS('/realtime', { headers: { authorization: 'Bearer forged' } }), /401/);
     await assert.rejects(app.injectWS('/realtime', { headers: { authorization: 'Bearer token-revoked' } }), /401/);
+  });
+
+  test('a terminated session is disconnected at once and cannot reconnect', async () => {
+    const bob = await connect('token-bob');
+    const closed = closeCode(bob.socket);
+    terminateSession('bob-phone');
+    assert.equal(await closed, CLOSE_SESSION_REVOKED);
+    assert.equal(hub.isDeviceConnected('bob-phone'), false);
+    await assert.rejects(app.injectWS('/realtime', { headers: { authorization: 'Bearer token-bob' } }), /401/);
+  });
+
+  test('a terminated session cannot send call signaling, even before its socket has closed', async () => {
+    const alice = await connect('token-alice');
+    const bob = await connect('token-bob');
+    const closed = closeCode(bob.socket);
+    // Known terminated, but the socket hasn't been closed yet.
+    revoked.add('bob-phone');
+    bob.send({ type: 'call.invite', callId: CALL, conversationId: CONVERSATION, media: 'audio', payload: 'b2ZmZXI=' });
+    assert.equal(await closed, CLOSE_SESSION_REVOKED);
+    assert.equal(calls.size, 0);
+    // The other account's connection is unaffected.
+    alice.send({ type: 'ping' });
+    await alice.events.next('pong');
+  });
+
+  test('terminating a session ends its call immediately for the other participant', async () => {
+    const alice = await connect('token-alice');
+    const bob = await connect('token-bob');
+    alice.send({ type: 'call.invite', callId: CALL, conversationId: CONVERSATION, media: 'video', payload: 'b2ZmZXI=' });
+    await bob.events.next('call.incoming');
+    bob.send({ type: 'call.accept', callId: CALL, payload: 'YW5zd2Vy' });
+    await alice.events.next('call.accepted');
+
+    terminateSession('bob-phone');
+    assert.deepEqual(await alice.events.next('call.ended'), { type: 'call.ended', callId: CALL, reason: 'connection_lost' });
+    assert.equal(calls.size, 0);
   });
 
   test('relays a whole call between two authenticated devices without touching payloads', async () => {

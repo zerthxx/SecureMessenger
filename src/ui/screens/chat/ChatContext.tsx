@@ -135,6 +135,7 @@ interface UserSearchResult {
   id: string;
   username: string;
   displayName: string;
+  avatarId: string | null;
 }
 
 interface ChatContextValue {

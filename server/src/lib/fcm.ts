@@ -18,6 +18,8 @@ export interface FcmServiceAccount {
 
 /** Android notification channel the app creates on the device (see src/infrastructure/notifications/pushNotifications.ts). */
 export const MESSAGES_CHANNEL_ID = 'messages';
+/** Android channel for account security alerts (new logins); created by the app (pushNotifications.ts). */
+export const SECURITY_CHANNEL_ID = 'security';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
@@ -70,6 +72,25 @@ export function buildNewMessagePush(token: string, conversationId: string): FcmM
       android: {
         priority: 'HIGH',
         notification: { channel_id: MESSAGES_CHANNEL_ID, tag: `conversation:${conversationId}` },
+      },
+    },
+  };
+}
+
+/**
+ * Security alert for a new sign-in (text from lib/newLogin.ts). Unlike message
+ * pushes it names the new device — recognizing it is the point — but carries
+ * no credential; the session id in `data` only lets a tap open Devices.
+ */
+export function buildNewLoginPush(token: string, text: { title: string; body: string }, sessionId: string): FcmMessage {
+  return {
+    message: {
+      token,
+      notification: text,
+      data: { type: 'new_login', sessionId },
+      android: {
+        priority: 'HIGH',
+        notification: { channel_id: SECURITY_CHANNEL_ID, tag: `new_login:${sessionId}` },
       },
     },
   };

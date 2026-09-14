@@ -1,21 +1,26 @@
 import { useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 
+import { formatIsoBirthday } from '@/core/utils/birthday';
+import { useAvatarImage } from '@/ui/hooks/useAvatarImage';
 import { useTheme } from '@/ui/theme';
-import { AppText, Avatar, Card, ConfirmModal, Divider, ListRow } from '@/ui/components';
+import { AppText, Avatar, Button, Card, ConfirmModal, Divider, ListRow } from '@/ui/components';
 import { useAuth } from './auth';
 
 export function ProfileScreen(): React.JSX.Element {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { user, logout } = useAuth();
+  const { user, profile, logout } = useAuth();
   const [signOutVisible, setSignOutVisible] = useState(false);
+  const avatarUri = useAvatarImage(user?.id, profile?.avatarId);
 
-  const displayName = user?.displayName ?? '';
+  const displayName = profile?.displayName ?? user?.displayName ?? '';
   const handle = user ? `@${user.username}` : '';
+  const openEditProfile = () => router.push('/settings/edit-profile');
 
   const handleSignOut = async () => {
     try {
@@ -33,13 +38,31 @@ export function ProfileScreen(): React.JSX.Element {
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.identity}>
-        <Avatar name={displayName} size="xl" />
+        <Pressable onPress={openEditProfile} accessibilityRole="button" accessibilityLabel="Edit profile">
+          <Avatar name={displayName} size="xl" imageUri={avatarUri} />
+        </Pressable>
         <AppText variant="headline" style={styles.name}>
           {displayName}
         </AppText>
         <AppText variant="body" color="secondary">
           {handle}
         </AppText>
+        {profile?.bio ? (
+          <AppText variant="body" style={styles.bio}>
+            {profile.bio}
+          </AppText>
+        ) : null}
+        {profile?.birthday ? (
+          <View style={styles.birthday}>
+            <Ionicons name="gift-outline" size={14} color={theme.colors.textSecondary} />
+            <AppText variant="caption" color="secondary">
+              {formatIsoBirthday(profile.birthday)}
+            </AppText>
+          </View>
+        ) : null}
+        <View style={styles.editButton}>
+          <Button label="Edit profile" variant="secondary" onPress={openEditProfile} />
+        </View>
       </View>
 
       <Card padded={false} style={styles.menuCard}>
@@ -93,6 +116,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   name: {
+    marginTop: 14,
+  },
+  bio: {
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  birthday: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+  },
+  editButton: {
     marginTop: 14,
   },
   menuCard: {

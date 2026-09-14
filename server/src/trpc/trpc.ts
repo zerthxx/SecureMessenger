@@ -2,6 +2,7 @@ import { initTRPC, TRPCError } from '@trpc/server';
 
 import { isProduction } from '../config/env.js';
 import { checkRateLimit, RateLimitExceededError } from '../lib/rateLimit.js';
+import { SESSION_TERMINATED_MESSAGE } from '../lib/sessions.js';
 import type { Context } from './context.js';
 
 const t = initTRPC.context<Context>().create({
@@ -26,12 +27,23 @@ const t = initTRPC.context<Context>().create({
 
 export const router = t.router;
 export const publicProcedure = t.procedure;
+/** Lets tests call a router's procedures directly with a hand-built context (see routers/users.test.ts). */
+export const createCallerFactory = t.createCallerFactory;
 
-/** Requires a valid, non-expired access token. See context.ts for what "valid" checks. */
-export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
+/**
+ * Requires a valid, non-expired access token (see context.ts) whose session
+ * is still live — not terminated from Settings → Devices, by signing out
+ * everywhere, or for inactivity (lib/sessions.ts). Also records the session
+ * as active (throttled).
+ */
+export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   if (!ctx.user || !ctx.device) {
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Authentication required' });
   }
+  if (!(await ctx.sessions.isActive(ctx.user.id, ctx.device.id))) {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: SESSION_TERMINATED_MESSAGE });
+  }
+  ctx.sessions.touch(ctx.device.id, ctx.req.ip);
   return next({ ctx: { ...ctx, user: ctx.user, device: ctx.device } });
 });
 

@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useTheme } from '@/ui/theme';
 import { AppText, BrandMark, Button } from '@/ui/components';
+import { SessionEndedBanner } from './auth/SessionEndedBanner';
 
 const highlights: { icon: keyof typeof Ionicons.glyphMap; text: string }[] = [
   { icon: 'lock-closed-outline', text: 'Your conversations stay yours' },
@@ -23,6 +24,7 @@ export function WelcomeScreen({ onCreateAccount, onLogIn }: WelcomeScreenProps):
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background, paddingBottom: insets.bottom + theme.spacing.xl }]}>
       <View style={styles.hero}>
+        <SessionEndedBanner />
         <BrandMark size={64} />
         <AppText variant="display" style={styles.title}>
           Talk freely.

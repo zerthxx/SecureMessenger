@@ -8,13 +8,16 @@ import {
   configureForegroundPresentation,
   ensureMessagesChannel,
   getFcmToken,
-  getLaunchNotificationConversationId,
+  getLaunchNotificationTarget,
   getNotificationPermission,
   onPushTokenChanged,
   openNotificationSettings,
+  presentNewLoginNotification,
   requestNotificationPermission,
   type NotificationPermission,
+  type NotificationTarget,
 } from '@/infrastructure/notifications/pushNotifications';
+import { realtime } from '@/infrastructure/realtime/realtimeClient';
 import { getAppState, initMessageStore, setAppState } from '@/infrastructure/storage/messageStore';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
 
@@ -108,21 +111,39 @@ export function NotificationsProvider({ children }: PropsWithChildren): React.JS
     };
   }, [signedIn, active]);
 
-  // Tapping a message notification opens that conversation.
+  // Tapping a message notification opens that conversation; a new-login alert opens Devices.
   const launchResponseHandledRef = useRef(false);
   useEffect(() => {
     if (!signedIn) return;
-    const openConversation = (conversationId: string) =>
-      router.push({ pathname: '/(home)/chats/[id]', params: { id: conversationId } } as unknown as Href);
+    const open = (target: NotificationTarget) => {
+      if (target.kind === 'devices') {
+        router.push('/settings/devices' as unknown as Href);
+      } else {
+        router.push({ pathname: '/(home)/chats/[id]', params: { id: target.conversationId } } as unknown as Href);
+      }
+    };
     if (!launchResponseHandledRef.current) {
       launchResponseHandledRef.current = true;
-      getLaunchNotificationConversationId()
-        .then((id) => {
-          if (id) openConversation(id);
+      getLaunchNotificationTarget()
+        .then((target) => {
+          if (target) open(target);
         })
         .catch(() => {});
     }
-    return addNotificationTapListener(openConversation);
+    return addNotificationTapListener(open);
+  }, [signedIn]);
+
+  // "New login detected" for a login announced over the realtime socket (the
+  // server sends pushes only to devices that aren't connected).
+  useEffect(() => {
+    if (!signedIn) return;
+    const off = realtime.onEvent((event) => {
+      if (event.type !== 'security.new_login') return;
+      presentNewLoginNotification({ deviceName: event.deviceName, location: event.location, at: event.at }).catch(() => {});
+    });
+    return () => {
+      off();
+    };
   }, [signedIn]);
 
   const setEnabled = useCallback(

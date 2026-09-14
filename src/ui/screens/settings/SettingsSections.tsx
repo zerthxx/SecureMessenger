@@ -1,9 +1,11 @@
 import type { PropsWithChildren, ReactNode } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, type Href } from 'expo-router';
 
 import { useTheme, useThemePreference, type ThemePreference } from '@/ui/theme';
+import type { BirthdayVisibility, OwnProfile } from '@/domain/entities';
 import { AppText, Card, Divider, ListRow, TopBar } from '@/ui/components';
+import { useAuth } from '@/ui/screens/auth/AuthContext';
 import { useNotifications, type NotificationsState } from './NotificationsProvider';
 import { useSettingsPreferences } from './SettingsPreferencesProvider';
 
@@ -102,6 +104,20 @@ function ThemePicker(): React.JSX.Element {
   );
 }
 
+/** Settings → Privacy & Security → Devices: where the account is signed in. */
+function DevicesRow(): React.JSX.Element {
+  const router = useRouter();
+  return (
+    <ListRow
+      icon="phone-portrait-outline"
+      label="Devices"
+      subtitle="Manage where you're signed in"
+      // Cast: expo-router's generated route types pick up new routes on the next dev-server run.
+      onPress={() => router.push('/settings/devices' as unknown as Href)}
+    />
+  );
+}
+
 function ChangePasswordRow(): React.JSX.Element {
   const router = useRouter();
   return <ListRow icon="key-outline" label="Change password" onPress={() => router.push('/change-password')} />;
@@ -133,14 +149,30 @@ export function AccountSection(): React.JSX.Element {
         <SettingsRow>
           <ChangePasswordRow />
         </SettingsRow>
+        <Divider inset={60} />
+        <SettingsRow>
+          <DevicesRow />
+        </SettingsRow>
       </SettingsCard>
     </>
   );
 }
 
+const BIRTHDAY_VISIBILITY_SUMMARY: Record<BirthdayVisibility, string> = {
+  hidden: 'Only you can see it',
+  month_day: 'Others see the day and month',
+  full: 'Others see the full date',
+};
+
+function describeBirthdayPrivacy(profile: OwnProfile | null): string | undefined {
+  if (!profile) return undefined;
+  return profile.birthday ? BIRTHDAY_VISIBILITY_SUMMARY[profile.birthdayVisibility] : 'Not set';
+}
+
 export function PrivacySection(): React.JSX.Element {
   const router = useRouter();
   const { readReceipts, setReadReceipts, showLastSeen, setShowLastSeen } = useSettingsPreferences();
+  const { profile } = useAuth();
 
   return (
     <>
@@ -152,6 +184,16 @@ export function PrivacySection(): React.JSX.Element {
         <Divider inset={60} />
         <SettingsRow>
           <ListRow type="switch" icon="time-outline" label="Show last seen" value={showLastSeen} onValueChange={setShowLastSeen} />
+        </SettingsRow>
+        <Divider inset={60} />
+        <SettingsRow>
+          {/* Birthday visibility is stored with the profile on the server, so it's edited there. */}
+          <ListRow
+            icon="gift-outline"
+            label="Birthday"
+            subtitle={describeBirthdayPrivacy(profile)}
+            onPress={() => router.push('/settings/edit-profile')}
+          />
         </SettingsRow>
         <Divider inset={60} />
         <SettingsRow>
@@ -168,6 +210,10 @@ export function SecuritySection(): React.JSX.Element {
     <>
       <SectionLabel text="Security" />
       <SettingsCard>
+        <SettingsRow>
+          <DevicesRow />
+        </SettingsRow>
+        <Divider inset={60} />
         <SettingsRow>
           <ChangePasswordRow />
         </SettingsRow>

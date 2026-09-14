@@ -1,4 +1,5 @@
-import { StyleSheet, View } from 'react-native';
+import { useState } from 'react';
+import { Image, StyleSheet, View } from 'react-native';
 
 import { useTheme } from '@/ui/theme';
 import { palette } from '@/ui/theme/palette';
@@ -40,13 +41,17 @@ export interface AvatarProps {
   size?: AvatarSize;
   online?: boolean;
   ringColor?: string;
+  /** Local uri of a profile photo. The initials show underneath while it loads, and stay if it fails. */
+  imageUri?: string | null;
 }
 
-export function Avatar({ name, size = 'md', online, ringColor }: AvatarProps): React.JSX.Element {
+export function Avatar({ name, size = 'md', online, ringColor, imageUri }: AvatarProps): React.JSX.Element {
   const theme = useTheme();
   const dimension = SIZES[size];
   const ringWidth = ringColor ? 2.5 : 0;
   const outerDimension = dimension + ringWidth * 2 + (ringColor ? 4 : 0);
+  // Remembers which uri failed to load, so a different uri gets a fresh attempt.
+  const [failedUri, setFailedUri] = useState<string | null>(null);
 
   const circle = (
     <View
@@ -68,6 +73,14 @@ export function Avatar({ name, size = 'md', online, ringColor }: AvatarProps): R
       >
         {initialsForName(name)}
       </AppText>
+      {imageUri && imageUri !== failedUri ? (
+        <Image
+          source={{ uri: imageUri }}
+          style={[StyleSheet.absoluteFill, { borderRadius: dimension / 2 }]}
+          onError={() => setFailedUri(imageUri)}
+          accessibilityIgnoresInvertColors
+        />
+      ) : null}
     </View>
   );
 
@@ -114,6 +127,7 @@ const styles = StyleSheet.create({
   circle: {
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
   },
   ring: {
     alignItems: 'center',

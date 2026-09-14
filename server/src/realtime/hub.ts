@@ -72,6 +72,23 @@ export class RealtimeHub {
     return reached;
   }
 
+  /**
+   * Stops routing to the device and closes its socket — used when its
+   * session is terminated. Returns whether it was connected. The route's own
+   * close handler then finds the connection already unregistered.
+   */
+  disconnectDevice(deviceId: string, code: number, reason: string): boolean {
+    const connection = this.byDevice.get(deviceId);
+    if (!connection) return false;
+    this.detach(connection);
+    try {
+      connection.socket.close(code, reason);
+    } catch {
+      // Already closing; it is unregistered either way.
+    }
+    return true;
+  }
+
   private detach(connection: RealtimeConnection): void {
     this.byDevice.delete(connection.deviceId);
     const set = this.byUser.get(connection.userId);

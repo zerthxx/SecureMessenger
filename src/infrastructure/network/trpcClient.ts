@@ -117,7 +117,7 @@ export function setAuthRefreshHandler(handler: AuthRefreshHandler | null): void 
   authRefreshHandler = handler;
 }
 
-function isUnauthorized(err: unknown): boolean {
+export function isUnauthorized(err: unknown): boolean {
   return err instanceof TRPCClientError && (err.data as { code?: string } | null)?.code === 'UNAUTHORIZED';
 }
 
@@ -262,6 +262,11 @@ export const usersApi = {
   search: (input: Inputs['users']['search']) =>
     withAuthRetry(() => untypedClient.query('users.search', input)) as Promise<Outputs['users']['search']>,
 
+  me: () => withAuthRetry(() => untypedClient.query('users.me')) as Promise<Outputs['users']['me']>,
+
+  getProfiles: (input: Inputs['users']['getProfiles']) =>
+    withAuthRetry(() => untypedClient.query('users.getProfiles', input)) as Promise<Outputs['users']['getProfiles']>,
+
   updateProfile: (input: Inputs['users']['updateProfile']) =>
     withAuthRetry(() => untypedClient.mutation('users.updateProfile', input)) as Promise<Outputs['users']['updateProfile']>,
 };
@@ -287,10 +292,53 @@ export const callsApi = {
   status: () => withAuthRetry(() => untypedClient.query('calls.status')) as Promise<Outputs['calls']['status']>,
 };
 
+/** Settings → Devices: the account's signed-in sessions. */
+export const sessionsApi = {
+  list: () => withAuthRetry(() => untypedClient.query('sessions.list')) as Promise<Outputs['sessions']['list']>,
+
+  get: (input: Inputs['sessions']['get']) =>
+    withAuthRetry(() => untypedClient.query('sessions.get', input)) as Promise<Outputs['sessions']['get']>,
+
+  terminate: (input: Inputs['sessions']['terminate']) =>
+    withAuthRetry(() => untypedClient.mutation('sessions.terminate', input)) as Promise<Outputs['sessions']['terminate']>,
+
+  terminateAllOthers: () =>
+    withAuthRetry(() => untypedClient.mutation('sessions.terminateAllOthers')) as Promise<Outputs['sessions']['terminateAllOthers']>,
+
+  setAutoTerminate: (input: Inputs['sessions']['setAutoTerminate']) =>
+    withAuthRetry(() => untypedClient.mutation('sessions.setAutoTerminate', input)) as Promise<
+      Outputs['sessions']['setAutoTerminate']
+    >,
+};
+
+/** The tRPC error code of a failed call (e.g. 'NOT_FOUND'), or null for any other kind of failure. */
+export function getApiErrorCode(err: unknown): string | null {
+  return err instanceof TRPCClientError ? ((err.data as { code?: string } | null)?.code ?? null) : null;
+}
+
+/**
+ * A procedure's input validation failure reaches the client as a JSON array
+ * of Zod issues in `message`. The first issue's own message ("Birthday can't
+ * be in the future.") is the part meant for people, not the raw JSON.
+ */
+function firstValidationIssueMessage(message: string): string | null {
+  if (!message.startsWith('[')) return null;
+  try {
+    const issues: unknown = JSON.parse(message);
+    const first: unknown = Array.isArray(issues) ? issues[0] : null;
+    if (first && typeof first === 'object' && typeof (first as { message?: unknown }).message === 'string') {
+      return (first as { message: string }).message;
+    }
+  } catch {
+    // Not JSON after all — shown as-is below.
+  }
+  return null;
+}
+
 /** Turns a tRPC error, or a plain Error thrown by local orchestration code, into a message safe to show directly in the UI. */
 export function getApiErrorMessage(err: unknown, fallback = 'Something went wrong. Please try again.'): string {
   if (err instanceof TRPCClientError) {
-    return err.message || fallback;
+    return firstValidationIssueMessage(err.message) ?? (err.message || fallback);
   }
   if (err instanceof Error && err.message) {
     return err.message;

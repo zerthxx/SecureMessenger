@@ -9,6 +9,8 @@ import * as Notifications from 'expo-notifications';
 
 /** Must match the channel id the server targets (server/src/lib/fcm.ts). */
 export const MESSAGES_CHANNEL_ID = 'messages';
+/** Security alerts such as new logins — must match SECURITY_CHANNEL_ID in server/src/lib/fcm.ts. */
+export const SECURITY_CHANNEL_ID = 'security';
 
 export type NotificationPermission = 'granted' | 'undetermined' | 'denied' | 'blocked';
 
@@ -20,6 +22,11 @@ export async function ensureMessagesChannel(): Promise<void> {
     description: 'New messages in your conversations',
     importance: Notifications.AndroidImportance.HIGH,
     vibrationPattern: [0, 250, 150, 250],
+  });
+  await Notifications.setNotificationChannelAsync(SECURITY_CHANNEL_ID, {
+    name: 'Security alerts',
+    description: 'New logins to your account',
+    importance: Notifications.AndroidImportance.HIGH,
   });
 }
 
@@ -103,16 +110,53 @@ export async function presentNewMessageNotification({
   });
 }
 
-export function addNotificationTapListener(onConversation: (conversationId: string) => void): () => void {
+/** Where tapping a notification leads: a conversation, or Settings → Devices for a new-login alert. */
+export type NotificationTarget = { kind: 'conversation'; conversationId: string } | { kind: 'devices' };
+
+function targetOf(data: unknown): NotificationTarget | null {
+  if ((data as { type?: unknown } | null | undefined)?.type === 'new_login') return { kind: 'devices' };
+  const conversationId = conversationIdOf(data);
+  return conversationId ? { kind: 'conversation', conversationId } : null;
+}
+
+export function addNotificationTapListener(onTarget: (target: NotificationTarget) => void): () => void {
   const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-    const id = conversationIdOf(response.notification.request.content.data);
-    if (id) onConversation(id);
+    const target = targetOf(response.notification.request.content.data);
+    if (target) onTarget(target);
   });
   return () => subscription.remove();
 }
 
-/** The conversation behind the notification that launched the app, if any. */
-export async function getLaunchNotificationConversationId(): Promise<string | null> {
+/** Where the notification that launched the app leads, if any. */
+export async function getLaunchNotificationTarget(): Promise<NotificationTarget | null> {
   const response = await Notifications.getLastNotificationResponseAsync();
-  return response ? conversationIdOf(response.notification.request.content.data) : null;
+  return response ? targetOf(response.notification.request.content.data) : null;
+}
+
+/**
+ * Posts the "New login detected" alert on this device, for a login announced
+ * over the realtime socket (connected devices get no push for it). Names the
+ * device, location when known, and the time — nothing else.
+ */
+export async function presentNewLoginNotification({
+  deviceName,
+  location,
+  at,
+}: {
+  deviceName: string;
+  location: string | null;
+  at: string;
+}): Promise<void> {
+  const time = new Date(at);
+  const when = Number.isNaN(time.getTime())
+    ? ''
+    : ` · ${time.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'New login detected',
+      body: `${deviceName}${location ? ` · ${location}` : ''}${when}. Tap to review your devices.`,
+      data: { type: 'new_login' },
+    },
+    trigger: Platform.OS === 'android' ? { channelId: SECURITY_CHANNEL_ID } : null,
+  });
 }
