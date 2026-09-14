@@ -31,19 +31,20 @@ export interface UpdateManifest {
   mandatory: boolean;
 }
 
-// v0.7.0 — apkUrl/sha256 point at the signed release APK uploaded to GitHub
-// Releases (zerthxx/SecureMessenger, tag v0.7.0); sha256 was computed locally
-// and matches the GitHub asset's recorded digest. Signed with the same
-// production keystore as v0.5.0/v0.6.0 (see keystores/KEYSTORE_INFO.md), so it
-// installs in place over those versions. Devices still on a pre-v0.5.0
-// production APK (signed with the original, lost key) must uninstall and
-// reinstall. Update this whole object (and bump versionCode) the next time a
-// signed release APK is cut and uploaded.
+// v0.8.0 — apkUrl/sha256 point at the signed release APK uploaded to GitHub
+// Releases (zerthxx/SecureMessenger, tag v0.8.0); sha256 was computed locally
+// from the uploaded file. Signed with the same production keystore as
+// v0.5.0–v0.7.0 (certificate SHA-256 4f:90:8d:90:…:ca:b5:98, see
+// keystores/KEYSTORE_INFO.md), so it installs in place over those versions.
+// Devices still on a pre-v0.5.0 production APK (signed with the original, lost
+// key) must uninstall and reinstall. Update this whole object (and bump
+// versionCode) the next time a signed release APK is cut and uploaded.
 export const CURRENT_UPDATE_MANIFEST: UpdateManifest = {
-  versionName: '0.7.0',
-  versionCode: 7,
-  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.7.0/app-release.apk',
-  sha256: '6c534634a9c4d27e223e60e3d6c2a9a886ec66b9df2d3c3cfe97eb61661c79cb',
-  releaseNotes: 'Hold the microphone to record voice messages, edit your display name, and use the new Privacy, Notifications and Appearance settings.',
+  versionName: '0.8.0',
+  versionCode: 8,
+  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.8.0/app-release.apk',
+  sha256: '2aa6844be56a155a8f67a59e05d123aa0a9bfa0475a90f2ca34678ae63be6245',
+  releaseNotes:
+    "Add a profile photo, bio and birthday, and view other people's profiles. New Devices screen: see where you're signed in, end sessions, and get alerted about new logins.",
   mandatory: false,
 };
