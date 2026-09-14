@@ -440,12 +440,60 @@ export function getMessageById(owner: string, id: string): MessageRow | null {
   return row ? rowToMessage(row) : null;
 }
 
-export function listMessagesForConversation(owner: string, conversationId: string): MessageRow[] {
+/**
+ * Newest-first page of a conversation — what the (inverted) message list
+ * renders. Bounded by `limit`, so opening or updating a long conversation
+ * costs about the same as a short one.
+ */
+export function listRecentMessages(owner: string, conversationId: string, limit: number): MessageRow[] {
   const rows = getDb().getAllSync<Parameters<typeof rowToMessage>[0]>(
-    `SELECT * FROM messages WHERE conversation_id = ? AND owner_user_id = ? ORDER BY created_at ASC, local_created_at ASC`,
-    [conversationId, owner],
+    `SELECT * FROM messages WHERE conversation_id = ? AND owner_user_id = ?
+     ORDER BY created_at DESC, local_created_at DESC, id DESC LIMIT ?`,
+    [conversationId, owner, limit],
   );
   return rows.map(rowToMessage);
+}
+
+/**
+ * Stored status and timestamp for whichever of `ids` this account already
+ * has — one query per sync instead of a lookup (and an upsert) per fetched
+ * row.
+ */
+export function getStoredMessageStates(owner: string, ids: string[]): Map<string, { status: MessageStatus; createdAt: string }> {
+  const states = new Map<string, { status: MessageStatus; createdAt: string }>();
+  // Chunked to stay far below SQLite's bound-parameter limit.
+  for (let start = 0; start < ids.length; start += 500) {
+    const chunk = ids.slice(start, start + 500);
+    const rows = getDb().getAllSync<{ id: string; status: string; created_at: string }>(
+      `SELECT id, status, created_at FROM messages WHERE owner_user_id = ? AND id IN (${chunk.map(() => '?').join(', ')})`,
+      [owner, ...chunk],
+    );
+    for (const row of rows) {
+      states.set(row.id, { status: row.status as MessageStatus, createdAt: row.created_at });
+    }
+  }
+  return states;
+}
+
+/** Applies the server's authoritative timestamp to an already-stored message. Ordering only — never touches content or status. */
+export function updateMessageCreatedAt(owner: string, id: string, createdAt: string): void {
+  assertOwnerUnchanged(owner);
+  getDb().runSync(`UPDATE messages SET created_at = ? WHERE id = ? AND owner_user_id = ?`, [createdAt, id, owner]);
+}
+
+/**
+ * The newest server `createdAt` this account has fully processed for a
+ * conversation — the incremental-sync cursor. Owner-scoped (unlike most
+ * app_state keys) for the same reason as `groupCreated:<owner>:<id>` in
+ * ChatContext: it describes this account's local store, not server state.
+ */
+export function getSyncCursor(owner: string, conversationId: string): string | null {
+  return getAppState(`syncCursor:${owner}:${conversationId}`);
+}
+
+export function setSyncCursor(owner: string, conversationId: string, createdAt: string): void {
+  assertOwnerUnchanged(owner);
+  setAppState(`syncCursor:${owner}:${conversationId}`, createdAt);
 }
 
 /** Refreshes the chat-list preview fields from this conversation's newest message. Call after any recordMessage that could be the newest. */

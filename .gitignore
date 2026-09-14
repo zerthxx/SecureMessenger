@@ -36,6 +36,15 @@ yarn-error.*
 .DS_Store
 *.pem
 
+# Firebase Android client config (project messenger-68098). Needed locally to
+# build; kept out of the repo. Never put the server's FCM service account
+# key anywhere in the project — it belongs only in Railway's variables.
+google-services.json
+# Firebase/Google service account private keys (the server's FCM credential).
+# Never commit these; the key belongs only in Railway's variables.
+*-firebase-adminsdk-*.json
+*service-account*.json
+
 # environment secrets — never commit real values
 .env
 .env.*
@@ -67,6 +76,10 @@ modules/mls-core/android/.cxx/
 
 # Gradle build output for the local app-updater Expo module
 modules/app-updater/android/build/
+
+# Gradle build output for the local call-session Expo module
+modules/call-session/android/build/
+modules/call-session/android/.cxx/
 
 # Local run logs from launching the dev stack (Metro, the emulator, the
 # API server, Gradle). Regenerated on every run; never useful in review.

@@ -6,6 +6,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ThemeProvider, useTheme } from '@/ui/theme';
 import { AuthProvider, ChatProvider, UpdateDialog, UpdateIndicator, UpdateProvider } from '@/ui/screens';
+import { ActiveCallBanner, CallProvider } from '@/ui/screens/call';
 import { NotificationsProvider, SettingsPreferencesProvider } from '@/ui/screens/settings';
 
 const CARD = { presentation: 'card', animation: 'slide_from_right' } as const;
@@ -35,6 +36,7 @@ function RootNavigator(): React.JSX.Element {
         <Stack.Screen name="settings/legal" options={CARD} />
         <Stack.Screen name="settings/help" options={CARD} />
         <Stack.Screen name="change-password" options={CARD} />
+        <Stack.Screen name="call" options={{ presentation: 'fullScreenModal', animation: 'fade', gestureEnabled: false }} />
       </Stack>
     </>
   );
@@ -49,11 +51,14 @@ export default function RootLayout(): React.JSX.Element {
             <AuthProvider>
               <NotificationsProvider>
                 <ChatProvider>
-                  <UpdateProvider>
-                    <RootNavigator />
-                    <UpdateIndicator />
-                    <UpdateDialog />
-                  </UpdateProvider>
+                  <CallProvider>
+                    <UpdateProvider>
+                      <RootNavigator />
+                      <ActiveCallBanner />
+                      <UpdateIndicator />
+                      <UpdateDialog />
+                    </UpdateProvider>
+                  </CallProvider>
                 </ChatProvider>
               </NotificationsProvider>
             </AuthProvider>

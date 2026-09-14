@@ -281,6 +281,12 @@ export const notificationsApi = {
     >,
 };
 
+export const callsApi = {
+  iceServers: () => withAuthRetry(() => untypedClient.query('calls.iceServers')) as Promise<Outputs['calls']['iceServers']>,
+
+  status: () => withAuthRetry(() => untypedClient.query('calls.status')) as Promise<Outputs['calls']['status']>,
+};
+
 /** Turns a tRPC error, or a plain Error thrown by local orchestration code, into a message safe to show directly in the UI. */
 export function getApiErrorMessage(err: unknown, fallback = 'Something went wrong. Please try again.'): string {
   if (err instanceof TRPCClientError) {

@@ -6,7 +6,15 @@ import { getVoicePlaybackState, subscribeVoicePlayback, type VoicePlaybackState 
 export function useVoicePlaybackState(messageId: string): { playing: boolean; currentTime: number; duration: number } {
   const [state, setState] = useState<VoicePlaybackState>(getVoicePlaybackState);
 
-  useEffect(() => subscribeVoicePlayback(setState), []);
+  // Every bubble subscribes, but only the bubble whose message starts or
+  // stops being the active one needs to re-render on a playback update.
+  useEffect(
+    () =>
+      subscribeVoicePlayback((next) => {
+        setState((current) => (next.messageId === messageId || current.messageId === messageId ? next : current));
+      }),
+    [messageId],
+  );
 
   if (state.messageId !== messageId) {
     return { playing: false, currentTime: 0, duration: 0 };

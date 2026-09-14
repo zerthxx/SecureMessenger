@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 import { AppState } from 'react-native';
 
-import type { Conversation, Message } from '@/domain/entities';
+import type { Conversation } from '@/domain/entities';
 import { base64ToBytes, bytesToBase64 } from '@/infrastructure/crypto/base64';
 import {
   addMemberToGroup,
@@ -21,29 +21,43 @@ import {
   getAppState,
   getMessageById,
   getMessageStoreOwner,
+  getStoredMessageStates,
+  getSyncCursor,
   initMessageStore,
   isConversationJoined,
   listLocalConversations,
-  listMessagesForConversation,
   markConversationJoined,
   recordMessage,
   reconcileSentMessageId,
   refreshConversationPreview,
   setAppState,
   setMessageStoreOwner,
+  setSyncCursor,
   setVoiceMediaId,
+  updateMessageCreatedAt,
   updateMessageStatus,
   updateVoiceAudio,
   upsertConversation,
-  type MessageRow,
 } from '@/infrastructure/storage/messageStore';
 import { presentNewMessageNotification } from '@/infrastructure/notifications/pushNotifications';
+import { realtime } from '@/infrastructure/realtime/realtimeClient';
 import { persistRecording, readAudioBytes, writeDownloadedAudio } from '@/infrastructure/storage/voiceFiles';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
 import { useNotifications } from '@/ui/screens/settings/NotificationsProvider';
+import { notifyConversationChanged } from './conversationMessages';
 
 const KEY_PACKAGE_BATCH_SIZE = 20;
 const CONVERSATIONS_POLL_MS = 6000;
+/** With the realtime socket connected, only every Nth list poll runs (30 s): changes arrive as hints instead. */
+const ONLINE_POLL_EVERY = 5;
+
+/**
+ * How far before the newest already-processed message an incremental sync
+ * starts reading again. A row is timestamped when its insert starts, so a
+ * row that commits a moment after a later-stamped one could otherwise land
+ * behind the cursor; anything re-read inside this window is skipped by id.
+ */
+const SYNC_OVERLAP_MS = 2 * 60 * 1000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -51,6 +65,26 @@ function nowIso(): string {
 
 function randomLocalId(): string {
   return `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sameConversationList(a: Conversation[], b: Conversation[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((conversation, index) => {
+      const other = b[index];
+      return (
+        other !== undefined &&
+        conversation.id === other.id &&
+        conversation.otherUserId === other.otherUserId &&
+        conversation.otherUsername === other.otherUsername &&
+        conversation.otherDisplayName === other.otherDisplayName &&
+        conversation.groupJoined === other.groupJoined &&
+        conversation.lastMessagePreview === other.lastMessagePreview &&
+        conversation.lastMessageAt === other.lastMessageAt &&
+        conversation.createdAt === other.createdAt
+      );
+    })
+  );
 }
 
 /**
@@ -97,31 +131,6 @@ function parseVoiceEnvelope(plaintext: string): VoiceEnvelope | null {
   return null;
 }
 
-function toMessage(row: MessageRow): Message {
-  // Outgoing messages (sending/sent/failed) always store our own
-  // authored plaintext and it's always safe to display it. Incoming
-  // messages only ever have real plaintext once `status === 'decrypted'`
-  // — `decryption_failed` rows have `plaintext === null` regardless of
-  // direction, so this single check covers both correctly: never
-  // surface text for a failed decryption, always surface it otherwise.
-  // Voice messages never populate `text` at all — their content lives in
-  // the audio* fields instead.
-  return {
-    id: row.id,
-    conversationId: row.conversationId,
-    senderDeviceId: row.senderDeviceId,
-    direction: row.direction,
-    status: row.status,
-    kind: row.kind,
-    text: row.status === 'decryption_failed' || row.kind === 'voice' ? null : row.plaintext,
-    audioMediaId: row.audioMediaId,
-    audioDurationMs: row.audioDurationMs,
-    audioLocalUri: row.audioLocalUri,
-    audioState: row.audioState,
-    createdAt: row.createdAt,
-  };
-}
-
 interface UserSearchResult {
   id: string;
   username: string;
@@ -135,7 +144,6 @@ interface ChatContextValue {
   retryE2eeSetup(): Promise<void>;
   refreshConversations(): Promise<void>;
   startConversation(otherUserId: string, otherUsername: string, otherDisplayName: string): Promise<string>;
-  getMessages(conversationId: string): Message[];
   pollConversation(conversationId: string): Promise<void>;
   sendChatMessage(conversationId: string, text: string): Promise<void>;
   sendVoiceMessage(conversationId: string, localFileUri: string, durationMs: number): Promise<void>;
@@ -151,9 +159,13 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [e2eeReady, setE2eeReady] = useState(false);
   const [e2eeError, setE2eeError] = useState<string | null>(null);
-  // Bumped after any local-store write so screens reading getMessages()
-  // re-render — the SQLite store itself has no subscription mechanism.
-  const [messagesVersion, setMessagesVersion] = useState(0);
+
+  // The list is re-read from SQLite on every sync; only a real change should
+  // re-render the screens showing it. Message changes don't go through
+  // provider state at all — see conversationMessages.ts.
+  const applyConversations = useCallback((next: Conversation[]) => {
+    setConversations((current) => (sameConversationList(current, next) ? current : next));
+  }, []);
 
   // Read inside pollConversation without widening its dependencies. Messages
   // created before this session started are never announced, so opening the
@@ -257,10 +269,18 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
 
   /**
    * Looks for a Welcome message addressed to this device and, for
-   * already-joined groups, decrypts any new application messages.
-   * Safe to call repeatedly and concurrently with itself for the same
-   * conversation — every non-idempotent step (join, decrypt) is guarded
-   * by an "already processed" check against the local store first.
+   * already-joined groups, decrypts any new application messages. Only
+   * ever called through `pollConversation`, which guarantees a single
+   * sync per conversation at a time; every non-idempotent step (join,
+   * decrypt) is still guarded by an "already processed" check against the
+   * local store first.
+   *
+   * Incremental: once a conversation has been synced, only rows from
+   * shortly before the newest one already processed are fetched (see
+   * SYNC_OVERLAP_MS), and rows already stored are skipped without any
+   * write. Measured on v0.7.0, re-downloading and re-writing the whole
+   * history on every 3-second poll cost ~2.4 MB and ~4.5 s of JS-thread
+   * time per minute with a 300-message chat open.
    *
    * Captures its own owner at entry (`owner`) and re-checks
    * `getMessageStoreOwner() === owner` after every `await` before
@@ -270,67 +290,74 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
    * `assertOwnerUnchanged` inside each messageStore write is the same
    * guarantee's backstop, in case a future change here misses a check.
    */
-  const pollConversation = useCallback(
+  const syncConversation = useCallback(
     async (conversationId: string): Promise<void> => {
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return;
+      const cursor = getSyncCursor(owner, conversationId);
+      const sinceCreatedAt = cursor ? new Date(Date.parse(cursor) - SYNC_OVERLAP_MS).toISOString() : undefined;
       let rows: Awaited<ReturnType<typeof e2eeApi.fetchMessages>>;
       try {
-        rows = await e2eeApi.fetchMessages({ conversationId });
+        rows = await e2eeApi.fetchMessages(sinceCreatedAt ? { conversationId, sinceCreatedAt } : { conversationId });
       } catch {
         return; // network/server failure this cycle — next poll will retry
       }
       if (getMessageStoreOwner() !== owner) return;
 
       const groupIdBytes = uuidToBytes(conversationId);
+      const stored = getStoredMessageStates(
+        owner,
+        rows.map((row) => row.id),
+      );
+      // Only a sync that actually wrote something re-renders the chat.
+      let changed = false;
+      let newestProcessedAt: string | null = null;
 
       for (const row of rows) {
         if (getMessageStoreOwner() !== owner) return;
-        const existing = getMessageById(owner, row.id);
 
         if (row.messageType === 'welcome') {
-          if (getAppState(`welcome_processed:${row.id}`) === '1') continue;
-          try {
-            await joinGroupFromWelcome(base64ToBytes(row.ciphertext));
+          if (getAppState(`welcome_processed:${row.id}`) !== '1') {
+            try {
+              await joinGroupFromWelcome(base64ToBytes(row.ciphertext));
+              if (getMessageStoreOwner() !== owner) return;
+              markConversationJoined(owner, conversationId);
+            } catch {
+              // Already joined (e.g. this device processed it in an
+              // earlier session before the flag was recorded) or a
+              // malformed Welcome — either way, nothing more to do with
+              // this specific message.
+            }
             if (getMessageStoreOwner() !== owner) return;
-            markConversationJoined(owner, conversationId);
-          } catch {
-            // Already joined (e.g. this device processed it in an
-            // earlier session before the flag was recorded) or a
-            // malformed Welcome — either way, nothing more to do with
-            // this specific message.
+            setAppState(`welcome_processed:${row.id}`, '1');
+            changed = true;
           }
-          if (getMessageStoreOwner() !== owner) return;
-          setAppState(`welcome_processed:${row.id}`, '1');
+          newestProcessedAt = row.createdAt;
           continue;
         }
 
         // application message
-        const alreadyProcessed = existing !== null && existing.status !== 'sending';
-        if (alreadyProcessed) {
-          // Reconcile ordering/metadata only — recordMessage's upsert
-          // never overwrites an already-decrypted plaintext (or, for a
-          // voice message, its kind/audio metadata). `kind` specifically
-          // must be threaded through explicitly here: unlike the other
-          // audio_* columns, recordMessage's ON CONFLICT does not
-          // preserve the existing `kind` on its own, so omitting it would
-          // silently downgrade an already-recorded voice message back to
-          // 'text' on the very next poll cycle.
-          recordMessage(owner, {
-            id: row.id,
-            conversationId,
-            senderDeviceId: row.senderDeviceId,
-            direction: row.senderDeviceId === deviceId ? 'outgoing' : 'incoming',
-            status: existing!.status,
-            kind: existing!.kind,
-            plaintext: existing!.plaintext,
-            audioMediaId: existing!.audioMediaId,
-            audioDurationMs: existing!.audioDurationMs,
-            audioLocalUri: existing!.audioLocalUri,
-            audioState: existing!.audioState,
-            createdAt: row.createdAt,
-            localCreatedAt: existing!.localCreatedAt,
-          });
+        //
+        // `stored` was read before this loop's first await. A row it doesn't
+        // list as processed may have been written since (e.g. our own send
+        // confirming under its server id), so that row is re-read
+        // synchronously right before acting on it — the same guard the
+        // per-row lookup always gave.
+        let existing = stored.get(row.id) ?? null;
+        if (!existing || existing.status === 'sending') {
+          const fresh = getMessageById(owner, row.id);
+          existing = fresh ? { status: fresh.status, createdAt: fresh.createdAt } : null;
+        }
+        if (existing && existing.status !== 'sending') {
+          // Already decrypted (or recorded as undecryptable), so never
+          // decrypted again. The only thing the server can still correct is
+          // the ordering timestamp; content, status, kind and audio metadata
+          // stay exactly as stored.
+          if (existing.createdAt !== row.createdAt) {
+            updateMessageCreatedAt(owner, row.id, row.createdAt);
+            changed = true;
+          }
+          newestProcessedAt = row.createdAt;
           continue;
         }
 
@@ -348,6 +375,8 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
             createdAt: row.createdAt,
             localCreatedAt: row.createdAt,
           });
+          changed = true;
+          newestProcessedAt = row.createdAt;
           continue;
         }
 
@@ -398,13 +427,58 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
             localCreatedAt: row.createdAt,
           });
         }
+        changed = true;
+        newestProcessedAt = row.createdAt;
       }
 
       if (getMessageStoreOwner() !== owner) return;
-      refreshConversationPreview(owner, conversationId);
-      setMessagesVersion((v) => v + 1);
+      // Rows arrive oldest first, so this is the newest one handled. The
+      // cursor only moves once every row up to it has been processed.
+      if (newestProcessedAt && (!cursor || newestProcessedAt > cursor)) {
+        setSyncCursor(owner, conversationId, newestProcessedAt);
+      }
+      if (changed) {
+        refreshConversationPreview(owner, conversationId);
+        notifyConversationChanged(conversationId);
+      }
     },
     [deviceId],
+  );
+
+  /**
+   * One sync per conversation at a time. The chat screen's interval, the
+   * conversation-list refresh and a returning-to-foreground refresh can all
+   * ask for the same conversation while a sync is still in flight (slow
+   * network, a long first sync); instead of overlapping requests and
+   * decrypt attempts, the later request is folded into a single follow-up
+   * sync once the running one finishes, and every caller's promise
+   * resolves after data at least as new as its request.
+   */
+  const syncStateRef = useRef(new Map<string, { running: Promise<void>; again: boolean }>());
+
+  const pollConversation = useCallback(
+    (conversationId: string): Promise<void> => {
+      const states = syncStateRef.current;
+      const inFlight = states.get(conversationId);
+      if (inFlight) {
+        inFlight.again = true;
+        return inFlight.running;
+      }
+      const state = { running: Promise.resolve(), again: false };
+      state.running = (async () => {
+        try {
+          do {
+            state.again = false;
+            await syncConversation(conversationId);
+          } while (state.again);
+        } finally {
+          states.delete(conversationId);
+        }
+      })();
+      states.set(conversationId, state);
+      return state.running;
+    },
+    [syncConversation],
   );
 
   const refreshConversations = useCallback(async (): Promise<void> => {
@@ -416,12 +490,21 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       remote = await e2eeApi.listConversations();
     } catch {
       if (getMessageStoreOwner() !== owner) return; // logout raced this call — nothing to reconcile against
-      setConversations(listLocalConversations(owner));
+      applyConversations(listLocalConversations(owner));
       return;
     }
     if (getMessageStoreOwner() !== owner) return;
 
+    // Only conversations that are new here, or whose other party's profile
+    // changed, need a write — this runs every CONVERSATIONS_POLL_MS. (A row
+    // this account doesn't own yet isn't in `local`, so it is still upserted
+    // and owner-stamped exactly as before.)
+    const local = new Map(listLocalConversations(owner).map((conversation) => [conversation.id, conversation]));
     for (const row of remote) {
+      const existing = local.get(row.conversationId);
+      if (existing && existing.otherUsername === row.otherUser.username && existing.otherDisplayName === row.otherUser.displayName) {
+        continue;
+      }
       upsertConversation(owner, {
         id: row.conversationId,
         otherUserId: row.otherUser.id,
@@ -444,8 +527,8 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     }
 
     if (getMessageStoreOwner() !== owner) return;
-    setConversations(listLocalConversations(owner));
-  }, [pollConversation]);
+    applyConversations(listLocalConversations(owner));
+  }, [pollConversation, applyConversations]);
 
   useEffect(() => {
     if (status !== 'authenticated') {
@@ -475,10 +558,16 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     // refreshing once immediately on returning to foreground, so the
     // list isn't stale on resume) removes that cost with no change to
     // foreground behavior.
+    let ticks = 0;
+    const poll = () => {
+      ticks += 1;
+      if (realtime.getStatus() === 'online' && ticks % ONLINE_POLL_EVERY !== 0) return;
+      void refreshConversations();
+    };
     let interval: ReturnType<typeof setInterval> | null = null;
     const startInterval = () => {
       if (interval) return;
-      interval = setInterval(refreshConversations, CONVERSATIONS_POLL_MS);
+      interval = setInterval(poll, CONVERSATIONS_POLL_MS);
     };
     const stopInterval = () => {
       if (interval) {
@@ -506,6 +595,31 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     // pollConversation's deviceId dependency changes) for this interval.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, e2eeReady]);
+
+  // "Conversation updated" hints from the realtime socket: sync that
+  // conversation right away instead of on the next poll, and catch up on
+  // everything whenever the socket (re)connects.
+  useEffect(() => {
+    if (status !== 'authenticated' || !e2eeReady) return;
+    const offEvent = realtime.onEvent((event) => {
+      if (event.type !== 'conversation.updated') return;
+      const owner = getMessageStoreOwner();
+      if (owner && isConversationJoined(owner, event.conversationId)) {
+        void pollConversation(event.conversationId).then(() => {
+          if (getMessageStoreOwner() === owner) applyConversations(listLocalConversations(owner));
+        });
+      } else {
+        void refreshConversations();
+      }
+    });
+    const offStatus = realtime.onStatus((next) => {
+      if (next === 'online') void refreshConversations();
+    });
+    return () => {
+      offEvent();
+      offStatus();
+    };
+  }, [status, e2eeReady, pollConversation, refreshConversations, applyConversations]);
 
   /**
    * Deduplicates concurrent `startConversation` calls for the same
@@ -545,7 +659,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   /**
    * Captures `owner` once at entry and re-checks it after every `await`
    * (via `requireStillOwner`) before writing to messageStore or
-   * publishing trust material under that account — see `pollConversation`
+   * publishing trust material under that account — see `syncConversation`
    * for the same pattern and rationale. A stale check throws, aborting
    * the rest of this call; the caller (`startConversation`'s wrapper)
    * already removes this from the in-flight map in its own `finally`.
@@ -635,9 +749,11 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       }
 
       requireStillOwner();
-      setConversations(listLocalConversations(owner));
+      applyConversations(listLocalConversations(owner));
       return conversationId;
     },
+    // applyConversations is stable (no dependencies).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
@@ -648,20 +764,22 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       try {
         const groupIdBytes = uuidToBytes(conversationId);
         const ciphertext = await encryptMessage(groupIdBytes, text);
-        const { messageId } = await e2eeApi.sendMessage({
+        const { messageId, createdAt } = await e2eeApi.sendMessage({
           conversationId,
           ciphertext: bytesToBase64(ciphertext),
           messageType: 'application',
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
-        reconcileSentMessageId(owner, localId, messageId, nowIso());
+        // The server's own timestamp when it returns one (older servers
+        // don't), so ordering is right before the next sync confirms it.
+        reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
       } catch {
         if (getMessageStoreOwner() !== owner) return;
         updateMessageStatus(owner, localId, 'failed');
       }
       if (getMessageStoreOwner() !== owner) return;
       refreshConversationPreview(owner, conversationId);
-      setMessagesVersion((v) => v + 1);
+      notifyConversationChanged(conversationId);
     },
     [deviceId],
   );
@@ -712,20 +830,20 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         const envelope = buildVoiceEnvelope({ mediaId, durationMs, byteSize: bytes.length, mimeType: 'audio/m4a' });
         const metadataCiphertext = await encryptMessage(groupIdBytes, envelope);
         if (getMessageStoreOwner() !== owner) return;
-        const { messageId } = await e2eeApi.sendMessage({
+        const { messageId, createdAt } = await e2eeApi.sendMessage({
           conversationId,
           ciphertext: bytesToBase64(metadataCiphertext),
           messageType: 'application',
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
-        reconcileSentMessageId(owner, localId, messageId, nowIso());
+        reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
       } catch {
         if (getMessageStoreOwner() !== owner) return;
         updateMessageStatus(owner, localId, 'failed');
       }
       if (getMessageStoreOwner() !== owner) return;
       refreshConversationPreview(owner, conversationId);
-      setMessagesVersion((v) => v + 1);
+      notifyConversationChanged(conversationId);
     },
     [deviceId],
   );
@@ -750,7 +868,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         localCreatedAt: timestamp,
       });
       refreshConversationPreview(owner, conversationId);
-      setMessagesVersion((v) => v + 1);
+      notifyConversationChanged(conversationId);
       await attemptSend(conversationId, localId, text);
     },
     [deviceId, attemptSend],
@@ -794,7 +912,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         localCreatedAt: timestamp,
       });
       refreshConversationPreview(owner, conversationId);
-      setMessagesVersion((v) => v + 1);
+      notifyConversationChanged(conversationId);
       await attemptSendVoice(conversationId, localId, persistedUri, durationMs);
     },
     [deviceId, attemptSendVoice],
@@ -802,7 +920,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
 
   /**
    * Lazily fetches+decrypts a received voice message's audio blob on
-   * first playback (never eagerly on receipt — see `pollConversation`'s
+   * first playback (never eagerly on receipt — see `syncConversation`'s
    * `audioState: 'idle'`), then caches the decrypted bytes to a local
    * file so replaying the same message never re-downloads/re-decrypts.
    * A concurrent second call for the same message (e.g. a double tap)
@@ -818,7 +936,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     if (row.audioState === 'downloading' || row.audioState === 'downloaded') return;
 
     updateVoiceAudio(owner, messageId, { audioState: 'downloading' });
-    setMessagesVersion((v) => v + 1);
+    notifyConversationChanged(conversationId);
 
     try {
       const blobCiphertext = await downloadVoiceBlob(conversationId, row.audioMediaId);
@@ -834,7 +952,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       updateVoiceAudio(owner, messageId, { audioState: 'failed' });
     }
     if (getMessageStoreOwner() !== owner) return;
-    setMessagesVersion((v) => v + 1);
+    notifyConversationChanged(conversationId);
   }, []);
 
   const retryMessage = useCallback(
@@ -851,33 +969,16 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         // cleared) — nothing left to retry with.
         if (!row.audioLocalUri) return;
         updateMessageStatus(owner, messageId, 'sending');
-        setMessagesVersion((v) => v + 1);
+        notifyConversationChanged(conversationId);
         await attemptSendVoice(conversationId, messageId, row.audioLocalUri, row.audioDurationMs ?? 0);
         return;
       }
       if (row.plaintext === null) return;
       updateMessageStatus(owner, messageId, 'sending');
-      setMessagesVersion((v) => v + 1);
+      notifyConversationChanged(conversationId);
       await attemptSend(conversationId, messageId, row.plaintext);
     },
     [attemptSend, attemptSendVoice],
-  );
-
-  // Re-created whenever messagesVersion bumps, so screens calling
-  // getMessages() after a store write see fresh results — the SQLite
-  // store itself has no subscription mechanism to hook into. Reads the
-  // current owner synchronously (no await involved, so there's no race
-  // window here) and returns an empty list rather than throwing when
-  // there isn't one — this runs directly in ConversationScreen's render
-  // body, and a logout landing at just the wrong instant must not crash
-  // it.
-  const getMessages = useCallback(
-    (conversationId: string): Message[] => {
-      const owner = getMessageStoreOwner();
-      if (!owner) return [];
-      return listMessagesForConversation(owner, conversationId).map(toMessage);
-    },
-    [messagesVersion],
   );
 
   const searchUsers = useCallback(async (query: string): Promise<UserSearchResult[]> => {
@@ -893,7 +994,6 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       retryE2eeSetup: ensureE2eeSetup,
       refreshConversations,
       startConversation,
-      getMessages,
       pollConversation,
       sendChatMessage,
       sendVoiceMessage,
@@ -908,7 +1008,6 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       ensureE2eeSetup,
       refreshConversations,
       startConversation,
-      getMessages,
       pollConversation,
       sendChatMessage,
       sendVoiceMessage,

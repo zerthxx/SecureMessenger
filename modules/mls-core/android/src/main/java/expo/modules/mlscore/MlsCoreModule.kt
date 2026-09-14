@@ -19,6 +19,8 @@ import uniffi.mls_core.generateIdentityKey
 import uniffi.mls_core.generateKeyPackages
 import uniffi.mls_core.initialize as mlsCoreInitialize
 import uniffi.mls_core.joinGroupFromWelcome
+import uniffi.mls_core.openCallSignal
+import uniffi.mls_core.sealCallSignal
 
 // TEMPORARY diagnostic instrumentation — see MasterKeyManager.kt's
 // DIAG_TAG comment for full context. Same tag string (file-private
@@ -290,6 +292,26 @@ class MlsCoreModule : Module() {
       requireInitialized()
       try {
         decryptMessage(groupId, ciphertext)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    // Call signaling (SDP, ICE candidates), sealed with a key derived from the
+    // conversation's MLS group — read-only on group state; see call_signal.rs.
+    AsyncFunction("sealCallSignal") { groupId: ByteArray, callId: String, plaintext: String ->
+      requireInitialized()
+      try {
+        sealCallSignal(groupId, callId, plaintext)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    AsyncFunction("openCallSignal") { groupId: ByteArray, callId: String, sealed: ByteArray ->
+      requireInitialized()
+      try {
+        openCallSignal(groupId, callId, sealed)
       } catch (e: MlsCoreException) {
         throw MlsCoreRuntimeError(e)
       }

@@ -73,3 +73,19 @@ export async function encryptMessage(groupId: Uint8Array, plaintext: string): Pr
 export async function decryptMessage(groupId: Uint8Array, ciphertext: Uint8Array): Promise<string> {
   return MlsCoreModuleNative.decryptMessage(groupId, ciphertext);
 }
+
+/**
+ * Seals call signaling (an SDP offer/answer or ICE candidate) for the other
+ * member of a 1:1 conversation, with a key derived from the conversation's
+ * MLS group for this call (the MLS exporter). The server relaying it can't
+ * read or alter it. Read-only on group state: unlike encryptMessage it
+ * creates no MLS message, so it never affects chat message decryption.
+ */
+export async function sealCallSignal(groupId: Uint8Array, callId: string, plaintext: string): Promise<Uint8Array> {
+  return MlsCoreModuleNative.sealCallSignal(groupId, callId, plaintext);
+}
+
+/** Throws for anything tampered with or sealed for a different call, group, or epoch — never returns partial output. */
+export async function openCallSignal(groupId: Uint8Array, callId: string, sealed: Uint8Array): Promise<string> {
+  return MlsCoreModuleNative.openCallSignal(groupId, callId, sealed);
+}

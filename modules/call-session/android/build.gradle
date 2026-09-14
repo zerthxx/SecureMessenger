@@ -1,0 +1,36 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.callsession'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.callsession"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+// expo-notifications is linked into the app as a prebuilt artifact (see
+// expo-modules-autolinking's "publication"), so it's referenced by its Maven
+// coordinates at whatever version is installed in node_modules.
+def expoNotificationsVersion = new groovy.json.JsonSlurper().parse(new File(
+  providers.exec {
+    workingDir(rootDir)
+    commandLine("node", "--print", "require.resolve('expo-notifications/package.json')")
+  }.standardOutput.asText.get().trim()
+)).version
+
+dependencies {
+  // CallMessagingService extends expo-notifications' Firebase messaging
+  // service, so every non-call push still reaches it unchanged. Compile-only:
+  // the app already ships both at runtime.
+  compileOnly "host.exp.exponent:expo.modules.notifications:${expoNotificationsVersion}"
+  compileOnly 'com.google.firebase:firebase-messaging:25.0.1'
+}

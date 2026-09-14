@@ -18,6 +18,7 @@
 //! for its own use — never a private key. See each function's doc
 //! comment for exactly what crosses the boundary.
 
+mod call_signal;
 mod error;
 mod group;
 mod group_storage;
@@ -348,6 +349,33 @@ pub fn encrypt_message(group_id: Vec<u8>, plaintext: String) -> Result<Vec<u8>, 
 #[uniffi::export]
 pub fn decrypt_message(group_id: Vec<u8>, ciphertext: Vec<u8>) -> Result<String, MlsCoreError> {
     with_group_store(|_store, group_provider| group::decrypt_message(group_provider, &group_id, &ciphertext))
+}
+
+/// Like [`with_group_store`] minus the checkpoint, for operations that only
+/// read group state — a call's stream of signaling messages shouldn't
+/// rewrite the encrypted group-state blob each time.
+fn with_group_provider_read_only<T>(f: impl FnOnce(&GroupProvider) -> Result<T, MlsCoreError>) -> Result<T, MlsCoreError> {
+    let guard = STORES.lock().map_err(|_| MlsCoreError::Storage)?;
+    let open = guard.as_ref().ok_or(MlsCoreError::StorageNotInitialized)?;
+    f(&open.group_provider)
+}
+
+/// Seals a call-signaling payload (an SDP offer/answer or ICE candidate, as
+/// text) for the other members of `group_id`, keyed for `call_id` through the
+/// MLS exporter — see call_signal.rs. Read-only on group state: no MLS
+/// message is created and nothing advances, so it can't affect chat
+/// message decryption.
+#[uniffi::export]
+pub fn seal_call_signal(group_id: Vec<u8>, call_id: String, plaintext: String) -> Result<Vec<u8>, MlsCoreError> {
+    with_group_provider_read_only(|group_provider| call_signal::seal_call_signal(group_provider, &group_id, &call_id, &plaintext))
+}
+
+/// Opens a payload from [`seal_call_signal`] sealed by another member of the
+/// group for the same call. `InvalidCiphertext` — never partial output — for
+/// anything tampered with or sealed for a different call, group, or epoch.
+#[uniffi::export]
+pub fn open_call_signal(group_id: Vec<u8>, call_id: String, sealed: Vec<u8>) -> Result<String, MlsCoreError> {
+    with_group_provider_read_only(|group_provider| call_signal::open_call_signal(group_provider, &group_id, &call_id, &sealed))
 }
 
 #[cfg(test)]

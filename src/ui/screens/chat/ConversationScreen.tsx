@@ -1,16 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, FlatList, KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, AppState, FlatList, KeyboardAvoidingView, Platform, StyleSheet, View, type ListRenderItemInfo } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import type { Message } from '@/domain/entities';
 import { getApiErrorMessage } from '@/infrastructure/network/trpcClient';
 import { setActiveConversation } from '@/infrastructure/notifications/pushNotifications';
+import { realtime } from '@/infrastructure/realtime/realtimeClient';
 import { useTheme } from '@/ui/theme';
-import { EmptyState, LoadingState, MessageBubble, MessageComposer, TopBar } from '@/ui/components';
+import { EmptyState, IconButton, LoadingState, MessageBubble, MessageComposer, TopBar } from '@/ui/components';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
+import { useCall } from '@/ui/screens/call';
 import { useChat } from './ChatContext';
+import { loadOlderMessages, useConversationMessages } from './conversationMessages';
 
 const POLL_MS = 3000;
+/** With the realtime socket connected, only every Nth poll runs (30 s): new messages arrive as hints instead. */
+const ONLINE_POLL_EVERY = 10;
+
+function keyExtractor(message: Message): string {
+  return message.id;
+}
 
 export function ConversationScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -21,13 +30,13 @@ export function ConversationScreen(): React.JSX.Element {
     conversations,
     e2eeError,
     retryE2eeSetup,
-    getMessages,
     pollConversation,
     sendChatMessage,
     sendVoiceMessage,
     downloadVoiceMessage,
     retryMessage,
   } = useChat();
+  const { startCall } = useCall();
   const [retrying, setRetrying] = useState(false);
 
   async function handleRetryE2eeSetup() {
@@ -38,8 +47,7 @@ export function ConversationScreen(): React.JSX.Element {
       setRetrying(false);
     }
   }
-  const [loaded, setLoaded] = useState(false);
-  const listRef = useRef<FlatList<Message>>(null);
+  const [synced, setSynced] = useState(false);
 
   const conversation = useMemo(() => conversations.find((c) => c.id === id), [conversations, id]);
 
@@ -49,17 +57,18 @@ export function ConversationScreen(): React.JSX.Element {
     setActiveConversation(id);
     return () => setActiveConversation(null);
   }, [id]);
-  const messages = id ? getMessages(id) : [];
-  // FlatList is `inverted` so new messages stay pinned to the bottom
-  // without manual scroll management — inverted expects newest-first.
-  const inverted = useMemo(() => [...messages].reverse(), [messages]);
+
+  // Newest first, straight from the local store: re-renders only when this
+  // conversation's messages change, and already-stored messages show
+  // immediately instead of waiting for the first network sync.
+  const { messages, hasOlder } = useConversationMessages(id);
 
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     (async () => {
       await pollConversation(id);
-      if (!cancelled) setLoaded(true);
+      if (!cancelled) setSynced(true);
     })();
 
     // Audit fix: this previously polled every POLL_MS unconditionally,
@@ -68,10 +77,16 @@ export function ConversationScreen(): React.JSX.Element {
     // conversation-list poll. Paused while AppState isn't 'active', with
     // an immediate refresh on returning to foreground so messages aren't
     // stale on resume.
+    let ticks = 0;
+    const poll = () => {
+      ticks += 1;
+      if (realtime.getStatus() === 'online' && ticks % ONLINE_POLL_EVERY !== 0) return;
+      pollConversation(id);
+    };
     let interval: ReturnType<typeof setInterval> | null = null;
     const startInterval = () => {
       if (interval) return;
-      interval = setInterval(() => pollConversation(id), POLL_MS);
+      interval = setInterval(poll, POLL_MS);
     };
     const stopInterval = () => {
       if (interval) {
@@ -99,33 +114,69 @@ export function ConversationScreen(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  async function handleSend(text: string) {
-    if (!id) return;
-    try {
-      await sendChatMessage(id, text);
-    } catch (err) {
-      Alert.alert('Could not send message', getApiErrorMessage(err));
-    }
-  }
+  // Stable callbacks, so neither the memoized composer nor the memoized
+  // bubbles re-render when a message arrives.
+  const handleSend = useCallback(
+    async (text: string) => {
+      if (!id) return;
+      try {
+        await sendChatMessage(id, text);
+      } catch (err) {
+        Alert.alert('Could not send message', getApiErrorMessage(err));
+      }
+    },
+    [id, sendChatMessage],
+  );
 
-  async function handleSendVoice(uri: string, durationMs: number) {
-    if (!id) return;
-    try {
-      await sendVoiceMessage(id, uri, durationMs);
-    } catch (err) {
-      Alert.alert('Could not send voice message', getApiErrorMessage(err));
-    }
-  }
+  const handleSendVoice = useCallback(
+    async (uri: string, durationMs: number) => {
+      if (!id) return;
+      try {
+        await sendVoiceMessage(id, uri, durationMs);
+      } catch (err) {
+        Alert.alert('Could not send voice message', getApiErrorMessage(err));
+      }
+    },
+    [id, sendVoiceMessage],
+  );
 
-  async function handleRetry(messageId: string) {
-    if (!id) return;
-    await retryMessage(id, messageId);
-  }
+  const handleRetry = useCallback(
+    (messageId: string) => {
+      if (id) retryMessage(id, messageId);
+    },
+    [id, retryMessage],
+  );
 
-  async function handleDownloadAudio(messageId: string) {
-    if (!id) return;
-    await downloadVoiceMessage(id, messageId);
-  }
+  const handleDownloadAudio = useCallback(
+    (messageId: string) => {
+      if (id) downloadVoiceMessage(id, messageId);
+    },
+    [id, downloadVoiceMessage],
+  );
+
+  const handleEndReached = useCallback(() => {
+    if (id) loadOlderMessages(id);
+  }, [id]);
+
+  const handleCall = useCallback(
+    (media: 'audio' | 'video') => {
+      if (!id) return;
+      startCall(id, media).catch((err) => Alert.alert('Couldn’t start the call', getApiErrorMessage(err)));
+    },
+    [id, startCall],
+  );
+
+  const renderItem = useCallback(
+    ({ item }: ListRenderItemInfo<Message>) => (
+      <MessageBubble
+        message={item}
+        isOwn={item.senderDeviceId === deviceId}
+        onRetry={handleRetry}
+        onDownloadAudio={handleDownloadAudio}
+      />
+    ),
+    [deviceId, handleRetry, handleDownloadAudio],
+  );
 
   if (!id) {
     return (
@@ -146,8 +197,16 @@ export function ConversationScreen(): React.JSX.Element {
           title={conversation?.otherDisplayName ?? 'Chat'}
           subtitle={conversation?.groupJoined ? 'Encrypted' : e2eeError ? 'Encryption unavailable' : 'Setting up encryption…'}
           onBack={() => router.back()}
+          rightSlot={
+            conversation?.groupJoined ? (
+              <View style={styles.callButtons}>
+                <IconButton name="call-outline" accessibilityLabel="Start voice call" onPress={() => handleCall('audio')} />
+                <IconButton name="videocam-outline" accessibilityLabel="Start video call" onPress={() => handleCall('video')} />
+              </View>
+            ) : undefined
+          }
         />
-        {!loaded ? (
+        {!synced && messages.length === 0 ? (
           <LoadingState rows={5} />
         ) : messages.length === 0 ? (
           <View style={styles.emptyWrap}>
@@ -168,20 +227,18 @@ export function ConversationScreen(): React.JSX.Element {
             )}
           </View>
         ) : (
+          // `inverted` keeps new messages pinned to the bottom without manual
+          // scroll management; `messages` is already newest first.
           <FlatList
-            ref={listRef}
-            data={inverted}
+            data={messages}
             inverted
-            keyExtractor={(item) => item.id}
+            keyExtractor={keyExtractor}
+            renderItem={renderItem}
             contentContainerStyle={styles.listContent}
-            renderItem={({ item }) => (
-              <MessageBubble
-                message={item}
-                isOwn={item.senderDeviceId === deviceId}
-                onRetry={item.status === 'failed' ? () => handleRetry(item.id) : undefined}
-                onDownloadAudio={item.kind === 'voice' ? () => handleDownloadAudio(item.id) : undefined}
-              />
-            )}
+            initialNumToRender={15}
+            windowSize={11}
+            onEndReached={hasOlder ? handleEndReached : undefined}
+            onEndReachedThreshold={0.5}
             showsVerticalScrollIndicator={false}
           />
         )}
@@ -204,5 +261,9 @@ const styles = StyleSheet.create({
   emptyWrap: {
     flex: 1,
     justifyContent: 'center',
+  },
+  callButtons: {
+    flexDirection: 'row',
+    gap: 4,
   },
 });

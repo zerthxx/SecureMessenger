@@ -692,6 +692,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_join_group_from_welcome(
     ): Int
+    external fun uniffi_mls_core_checksum_func_open_call_signal(
+    ): Int
+    external fun uniffi_mls_core_checksum_func_seal_call_signal(
+    ): Int
     external fun ffi_mls_core_uniffi_contract_version(
     ): Int
 
@@ -724,6 +728,10 @@ internal object UniffiLib {
     external fun uniffi_mls_core_fn_func_initialize(`namespace`: RustBuffer.ByValue,`storagePath`: RustBuffer.ByValue,`groupStoragePath`: RustBuffer.ByValue,`masterKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_mls_core_fn_func_join_group_from_welcome(`welcomeBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_open_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`sealed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_seal_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_mls_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -872,6 +880,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_join_group_from_welcome() != 26381) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_mls_core_checksum_func_seal_call_signal() != 7720) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1672,6 +1686,46 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
     
         
         FfiConverterByteArray.lower(`welcomeBytes`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Opens a payload from [`seal_call_signal`] sealed by another member of the
+         * group for the same call. `InvalidCiphertext` — never partial output — for
+         * anything tampered with or sealed for a different call, group, or epoch.
+         */
+    @Throws(MlsCoreException::class) fun `openCallSignal`(`groupId`: kotlin.ByteArray, `callId`: kotlin.String, `sealed`: kotlin.ByteArray): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_open_call_signal(
+    
+        
+        FfiConverterByteArray.lower(`groupId`),
+        FfiConverterString.lower(`callId`),
+        FfiConverterByteArray.lower(`sealed`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Seals a call-signaling payload (an SDP offer/answer or ICE candidate, as
+         * text) for the other members of `group_id`, keyed for `call_id` through the
+         * MLS exporter — see call_signal.rs. Read-only on group state: no MLS
+         * message is created and nothing advances, so it can't affect chat
+         * message decryption.
+         */
+    @Throws(MlsCoreException::class) fun `sealCallSignal`(`groupId`: kotlin.ByteArray, `callId`: kotlin.String, `plaintext`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_seal_call_signal(
+    
+        
+        FfiConverterByteArray.lower(`groupId`),
+        FfiConverterString.lower(`callId`),
+        FfiConverterString.lower(`plaintext`),_status)
 }
     )
     }

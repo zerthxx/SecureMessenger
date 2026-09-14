@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -11,15 +12,25 @@ import { formatClockDuration } from './VoiceRecorderBar';
 export interface MessageBubbleProps {
   message: Message;
   isOwn: boolean;
-  onRetry?: () => void;
-  /** Called when a received voice message's audio hasn't been downloaded yet (or a previous download failed) and the user taps play. */
-  onDownloadAudio?: () => void;
+  /** Called with the message id when a message that failed to send is tapped. */
+  onRetry?: (messageId: string) => void;
+  /** Called with the message id when a received voice message's audio hasn't been downloaded yet (or a previous download failed) and the user taps play. */
+  onDownloadAudio?: (messageId: string) => void;
 }
 
+// Intl time formatting is comparatively slow on Hermes, and bubbles are
+// re-created as the list scrolls — each timestamp is formatted once.
+const timeLabels = new Map<string, string>();
+
 function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  let label = timeLabels.get(iso);
+  if (label === undefined) {
+    const date = new Date(iso);
+    label = Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    if (timeLabels.size >= 5000) timeLabels.clear();
+    timeLabels.set(iso, label);
+  }
+  return label;
 }
 
 function VoiceBubbleContent({
@@ -29,7 +40,7 @@ function VoiceBubbleContent({
 }: {
   message: Message;
   isOwn: boolean;
-  onDownloadAudio?: () => void;
+  onDownloadAudio?: (messageId: string) => void;
 }): React.JSX.Element {
   const theme = useTheme();
   const playback = useVoicePlaybackState(message.id);
@@ -53,7 +64,7 @@ function VoiceBubbleContent({
     }
     // idle, failed, or (defensively) any other non-ready state — (re)try fetching+decrypting the blob.
     if (message.audioState !== 'downloading') {
-      onDownloadAudio?.();
+      onDownloadAudio?.(message.id);
     }
   }
 
@@ -102,7 +113,12 @@ function VoiceBubbleContent({
   );
 }
 
-export function MessageBubble({ message, isOwn, onRetry, onDownloadAudio }: MessageBubbleProps): React.JSX.Element {
+/**
+ * Memoized: the conversation list keeps unchanged `Message` objects and
+ * passes stable callbacks, so a new or updated message re-renders only its
+ * own bubble instead of every bubble on screen.
+ */
+export const MessageBubble = memo(function MessageBubble({ message, isOwn, onRetry, onDownloadAudio }: MessageBubbleProps): React.JSX.Element {
   const theme = useTheme();
 
   // SECURITY: a failed decryption must never fall back to showing
@@ -171,7 +187,11 @@ export function MessageBubble({ message, isOwn, onRetry, onDownloadAudio }: Mess
   return (
     <View style={[styles.row, isOwn ? styles.rowOwn : styles.rowOther]}>
       {isFailedSend && onRetry ? (
-        <Pressable onPress={onRetry} accessibilityRole="button" accessibilityLabel={isVoice ? 'Retry voice message' : 'Retry sending message'}>
+        <Pressable
+          onPress={() => onRetry(message.id)}
+          accessibilityRole="button"
+          accessibilityLabel={isVoice ? 'Retry voice message' : 'Retry sending message'}
+        >
           {bubble}
         </Pressable>
       ) : (
@@ -179,7 +199,7 @@ export function MessageBubble({ message, isOwn, onRetry, onDownloadAudio }: Mess
       )}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   row: {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Vibration, View } from 'react-native';
 
 import { stopVoicePlayback } from '@/infrastructure/media/voicePlayer';
@@ -19,7 +19,9 @@ export interface MessageComposerProps {
 
 const HINT_DURATION_MS = 2500;
 
-export function MessageComposer({ disabled, placeholder, onSend, onSendVoice }: MessageComposerProps): React.JSX.Element {
+// Memoized: the conversation screen re-renders when messages arrive, but
+// the composer's props are stable, so typing state and the recorder stay put.
+export const MessageComposer = memo(function MessageComposer({ disabled, placeholder, onSend, onSendVoice }: MessageComposerProps): React.JSX.Element {
   const theme = useTheme();
   const [text, setText] = useState('');
   const [slideDistance, setSlideDistance] = useState(0);
@@ -237,7 +239,7 @@ export function MessageComposer({ disabled, placeholder, onSend, onSendVoice }: 
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   container: {

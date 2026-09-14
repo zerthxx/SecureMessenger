@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
-import { getRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder, useAudioRecorderState, type AudioRecorder } from 'expo-audio';
+import { getRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder, type AudioRecorder } from 'expo-audio';
 
 import {
   ensureRecordingPermission,
@@ -91,6 +91,9 @@ export interface VoiceRecorderApi {
   cancel(): void;
 }
 
+/** How often the elapsed time is read while (and only while) recording. */
+const ELAPSED_POLL_MS = 100;
+
 /**
  * Thin, component-lifecycle-scoped wrapper around expo-audio's recording
  * hooks. `useAudioRecorder` already releases its native recorder on
@@ -111,9 +114,8 @@ export function useVoiceRecorder(onMaxDurationReached: (result: VoiceRecordingRe
   const [phase, setPhaseState] = useState<VoiceRecorderPhase>('idle');
   const phaseRef = useRef<VoiceRecorderPhase>('idle');
   const recorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
-  const recorderState = useAudioRecorderState(recorder, 100);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const durationRef = useRef(0);
-  durationRef.current = recorderState.durationMillis;
   const hasSlotRef = useRef(false);
   const onMaxDurationReachedRef = useRef(onMaxDurationReached);
   onMaxDurationReachedRef.current = onMaxDurationReached;
@@ -178,15 +180,34 @@ export function useVoiceRecorder(onMaxDurationReached: (result: VoiceRecordingRe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Elapsed time is only read while recording. expo-audio's
+  // useAudioRecorderState polled the native recorder every 100 ms for as
+  // long as the composer was mounted, i.e. the whole time a chat was open.
+  useEffect(() => {
+    if (phase !== 'recording') return;
+    const readElapsed = () => {
+      try {
+        const { durationMillis } = recorder.getStatus();
+        durationRef.current = durationMillis;
+        setElapsedMs(durationMillis);
+      } catch {
+        // Native recorder already released (see safeIsRecording) — nothing to read.
+      }
+    };
+    readElapsed();
+    const interval = setInterval(readElapsed, ELAPSED_POLL_MS);
+    return () => clearInterval(interval);
+  }, [phase, recorder]);
+
   // Hard cap: auto-stop once MAX_RECORDING_MS is reached, routed through
   // the same `stop()` path a manual release takes.
   useEffect(() => {
-    if (phase === 'recording' && recorderState.durationMillis >= MAX_RECORDING_MS) {
+    if (phase === 'recording' && elapsedMs >= MAX_RECORDING_MS) {
       stop()
         .then((result) => onMaxDurationReachedRef.current(result))
         .catch((err) => console.warn('[useVoiceRecorder] max-duration auto-stop failed', err));
     }
-  }, [phase, recorderState.durationMillis, stop]);
+  }, [phase, elapsedMs, stop]);
 
   const start = useCallback(async (): Promise<VoiceRecordingStartResult> => {
     if (phaseRef.current === 'recording' || phaseRef.current === 'requesting_permission') return 'busy';
@@ -215,6 +236,8 @@ export function useVoiceRecorder(onMaxDurationReached: (result: VoiceRecordingRe
     try {
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await recorder.prepareToRecordAsync();
+      durationRef.current = 0;
+      setElapsedMs(0);
       recorder.record();
       setPhase('recording');
       return 'recording';
@@ -235,7 +258,7 @@ export function useVoiceRecorder(onMaxDurationReached: (result: VoiceRecordingRe
 
   return {
     phase,
-    elapsedMs: recorderState.durationMillis,
+    elapsedMs,
     start,
     stop,
     cancel,
