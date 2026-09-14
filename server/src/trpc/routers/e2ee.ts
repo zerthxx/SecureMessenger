@@ -1,10 +1,11 @@
 import { TRPCError } from '@trpc/server';
-import { and, asc, desc, eq, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
 import { conversationMembers, conversations, deviceKeyPackages, devices, messages, users } from '../../db/schema.js';
 import { notifyNewMessage } from '../../lib/pushDelivery.js';
+import { publishConversationUpdated } from '../../realtime/instance.js';
 import type { Context } from '../context.js';
 import { enforceRateLimit, protectedProcedure, router } from '../trpc.js';
 
@@ -50,6 +51,19 @@ const base64Bytes = z.string().refine(
   },
   { message: 'Expected non-empty base64-encoded bytes' },
 );
+
+/**
+ * `sinceCreatedAt` makes a fetch incremental: only rows created at or after
+ * that instant. Clients send their newest already-processed row's timestamp
+ * minus an overlap window and skip ids they already hold, so a row whose
+ * insert committed a moment after a later-stamped row is still seen.
+ * Omitted, the full history is returned — what app versions from before
+ * incremental sync still request.
+ */
+const fetchMessagesInput = z.object({
+  conversationId: z.string().uuid(),
+  sinceCreatedAt: z.string().datetime({ offset: true }).optional(),
+});
 
 export const e2eeRouter = router({
   /**
@@ -350,11 +364,19 @@ export const e2eeRouter = router({
           messageType: input.messageType,
           ciphertext: Buffer.from(input.ciphertext, 'base64'),
         })
-        .returning({ id: messages.id });
+        .returning({ id: messages.id, createdAt: messages.createdAt });
 
       if (!message) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to store message.' });
       }
+
+      // Content-free "sync now" hint to connected devices, so an open chat
+      // doesn't wait for its next poll. Not awaited, like the push below.
+      publishConversationUpdated({
+        conversationId: input.conversationId,
+        senderDeviceId: ctx.device.id,
+        recipientDeviceId: input.recipientDeviceId ?? null,
+      }).catch((err) => ctx.log.warn({ err }, 'realtime conversation update failed'));
 
       if (input.messageType === 'application') {
         // Not awaited: a slow or unavailable push provider must never fail or delay the send itself.
@@ -363,7 +385,7 @@ export const e2eeRouter = router({
         );
       }
 
-      return { messageId: message.id };
+      return { messageId: message.id, createdAt: message.createdAt.toISOString() };
     }),
 
   /**
@@ -372,7 +394,7 @@ export const e2eeRouter = router({
    * specifically to the caller's current device. Never returns another
    * device's addressed Welcome.
    */
-  fetchMessages: protectedProcedure.input(z.object({ conversationId: z.string().uuid() })).query(async ({ ctx, input }) => {
+  fetchMessages: protectedProcedure.input(fetchMessagesInput).query(async ({ ctx, input }) => {
     // Read-only and legitimately polled at a decent cadence by clients
     // without a push/websocket channel yet — generous ceiling, mainly to
     // blunt scripted hammering rather than shape normal usage. Not
@@ -406,6 +428,7 @@ export const e2eeRouter = router({
         and(
           eq(messages.conversationId, input.conversationId),
           or(isNull(messages.recipientDeviceId), eq(messages.recipientDeviceId, ctx.device.id)),
+          input.sinceCreatedAt ? gte(messages.createdAt, new Date(input.sinceCreatedAt)) : undefined,
         ),
       )
       .orderBy(asc(messages.createdAt));

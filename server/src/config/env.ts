@@ -37,6 +37,15 @@ const envSchema = z.object({
   // still stores device push tokens but delivers no pushes — see
   // lib/pushDelivery.ts and the `notifications.status` procedure.
   FCM_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  // Cloudflare Realtime TURN key (dashboard → Realtime → TURN Server). The
+  // API token mints short-lived relay credentials for calls and never leaves
+  // the server. Optional: without both, calls use direct connections only
+  // (STUN), which can't connect on some networks — see lib/iceServers.ts.
+  TURN_KEY_ID: z.string().min(1).optional(),
+  TURN_API_TOKEN: z.string().min(1).optional(),
+  // Development only (ignored in production): a JSON array of ICE servers
+  // returned instead, e.g. a TURN server on the dev machine for emulators.
+  DEV_ICE_SERVERS_JSON: z.string().optional(),
 });
 
 function loadEnv() {

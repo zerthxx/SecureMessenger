@@ -3,7 +3,16 @@ import { before, describe, test } from 'node:test';
 
 import { exportPKCS8, generateKeyPair } from 'jose';
 
-import { buildNewMessagePush, classifyFcmResponse, createFcmClient, parseServiceAccount, type FcmServiceAccount } from './fcm.js';
+import {
+  buildCallEndedPush,
+  buildIncomingCallPush,
+  buildNewMessagePush,
+  classifyFcmResponse,
+  createFcmClient,
+  INCOMING_CALL_PUSH_TTL_SECONDS,
+  parseServiceAccount,
+  type FcmServiceAccount,
+} from './fcm.js';
 
 describe('parseServiceAccount', () => {
   test('reads project_id, client_email and private_key', () => {
@@ -100,5 +109,27 @@ describe('createFcmClient', () => {
     assert.equal(await client.send(buildNewMessagePush('t', 'c')), 'auth_error');
     assert.equal(await client.send(buildNewMessagePush('t', 'c')), 'sent');
     assert.equal(tokenRequests, 2);
+  });
+});
+
+describe('call pushes', () => {
+  test('an incoming-call push is data-only, high priority, short-lived, and names no one', () => {
+    const push = buildIncomingCallPush('device-token', { callId: 'call-1', conversationId: 'conversation-1', media: 'video' });
+    assert.deepEqual(push, {
+      message: {
+        token: 'device-token',
+        data: { type: 'incoming_call', callId: 'call-1', conversationId: 'conversation-1', media: 'video' },
+        android: { priority: 'HIGH', ttl: `${INCOMING_CALL_PUSH_TTL_SECONDS}s` },
+      },
+    });
+    assert.equal('notification' in push.message, false);
+  });
+
+  test('a call-ended push carries only the call id and why it ended', () => {
+    assert.deepEqual(buildCallEndedPush('device-token', { callId: 'call-1', reason: 'cancelled' }).message.data, {
+      type: 'call_ended',
+      callId: 'call-1',
+      reason: 'cancelled',
+    });
   });
 });

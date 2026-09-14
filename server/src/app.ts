@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import websocket from '@fastify/websocket';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import fastify from 'fastify';
 
@@ -7,8 +8,10 @@ import { env, isProduction, trustProxyDisabledBehindProxy, trustProxyOption } fr
 import { apkDownloadRoutes } from './http/apkDownload.js';
 import { healthRoutes } from './http/health.js';
 import { mediaRoutes } from './http/media.js';
+import { realtimeRoutes } from './http/realtime.js';
 import { updateManifestRoutes } from './http/updateManifest.js';
 import { loggerOptions } from './lib/logger.js';
+import { attachRealtimeLogger, createRealtimeRouteOptions } from './realtime/instance.js';
 import { createContext } from './trpc/context.js';
 import { appRouter, type AppRouter } from './trpc/router.js';
 
@@ -43,6 +46,11 @@ export function buildApp() {
   app.register(updateManifestRoutes);
   app.register(apkDownloadRoutes, { prewarm: isProduction });
   app.register(mediaRoutes, { prefix: '/media' });
+
+  // Authenticated realtime channel: call signaling and "sync now" hints.
+  app.register(websocket, { options: { maxPayload: 128 * 1024 } });
+  attachRealtimeLogger(app.log);
+  app.register(realtimeRoutes, createRealtimeRouteOptions());
 
   app.register(fastifyTRPCPlugin, {
     prefix: '/trpc',

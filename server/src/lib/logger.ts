@@ -23,6 +23,10 @@ const REDACT_PATHS = [
   '*.refreshToken',
   '*.ciphertext',
   '*.plaintext',
+  // Calls: TURN relay credentials and sealed call signaling.
+  '*.credential',
+  '*.apiToken',
+  '*.payload',
 ];
 
 export const loggerOptions: LoggerOptions = {

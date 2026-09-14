@@ -75,6 +75,52 @@ export function buildNewMessagePush(token: string, conversationId: string): FcmM
   };
 }
 
+/**
+ * A data-only message: Android shows nothing for it by itself; the app's own
+ * messaging service decides what to display (the incoming-call screen).
+ */
+export interface FcmDataMessage {
+  message: {
+    token: string;
+    data: Record<string, string>;
+    android: { priority: 'HIGH'; ttl: string };
+  };
+}
+
+/** A call push is useless once the call has stopped ringing, so FCM drops it rather than deliver it late. */
+export const INCOMING_CALL_PUSH_TTL_SECONDS = 45;
+
+/**
+ * Wakes the callee's phone for an incoming call. Data-only and HIGH priority,
+ * so Android starts the app's messaging service even when the app is closed
+ * and it can show a full-screen incoming-call notification. Like message
+ * pushes it names no one: the app looks the caller up locally from the
+ * conversation id.
+ */
+export function buildIncomingCallPush(
+  token: string,
+  call: { callId: string; conversationId: string; media: 'audio' | 'video' },
+): FcmDataMessage {
+  return {
+    message: {
+      token,
+      data: { type: 'incoming_call', callId: call.callId, conversationId: call.conversationId, media: call.media },
+      android: { priority: 'HIGH', ttl: `${INCOMING_CALL_PUSH_TTL_SECONDS}s` },
+    },
+  };
+}
+
+/** Stops the ringing on devices that were woken for a call that is over (answered elsewhere, cancelled, missed). */
+export function buildCallEndedPush(token: string, call: { callId: string; reason: string }): FcmDataMessage {
+  return {
+    message: {
+      token,
+      data: { type: 'call_ended', callId: call.callId, reason: call.reason },
+      android: { priority: 'HIGH', ttl: '60s' },
+    },
+  };
+}
+
 export type FcmSendOutcome = 'sent' | 'invalid_token' | 'auth_error' | 'retryable' | 'failed';
 
 /** Maps an FCM v1 `messages:send` response to what the caller should do about it. */
@@ -104,7 +150,7 @@ export function classifyFcmResponse(status: number, body: unknown): FcmSendOutco
 }
 
 export interface FcmClient {
-  send(message: FcmMessage): Promise<FcmSendOutcome>;
+  send(message: FcmMessage | FcmDataMessage): Promise<FcmSendOutcome>;
 }
 
 export function createFcmClient(account: FcmServiceAccount, fetchImpl: typeof fetch = fetch): FcmClient {
