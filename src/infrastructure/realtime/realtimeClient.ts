@@ -54,6 +54,16 @@ class RealtimeClient {
   private readonly statusListeners = new Set<(status: RealtimeStatus) => void>();
   private readonly queue: RealtimeMessage[] = [];
   private wanted = false;
+  /**
+   * True from the start of connect() until it has either created a socket
+   * or given up. connect() awaits a token refresh before it assigns
+   * `socket`, and start()/send()/retries all call it — without this, two
+   * overlapping calls opened two sockets for one device. The server then
+   * closes one as "replaced"; when that was the tracked one, this client
+   * stopped reconnecting while ignoring the other's events, leaving
+   * realtime (chat hints, call signaling) dead until the app restarted.
+   */
+  private connecting = false;
   private attempts = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -105,6 +115,16 @@ class RealtimeClient {
   }
 
   private async connect(): Promise<void> {
+    if (this.connecting || this.socket) return;
+    this.connecting = true;
+    try {
+      await this.openSocket();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private async openSocket(): Promise<void> {
     this.clearRetry();
     let token = getAccessTokenForRequest();
     const expiresAt = token ? tokenExpiresAt(token) : null;

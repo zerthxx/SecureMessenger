@@ -9,6 +9,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
@@ -93,6 +94,14 @@ export const devices = pgTable(
     pushToken: text('push_token'),
     refreshTokenHash: text('refresh_token_hash'),
     refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
+    // The refresh token this device held before its last rotation, still
+    // accepted until `previousRefreshTokenValidUntil`. Rotation replaced the
+    // token outright, so a refresh whose response never reached the app (a
+    // dropped connection, the app killed before it saved the new token) left
+    // the app holding a token the server no longer knew: the next launch was
+    // told its session had ended. Cleared on sign-out/revocation.
+    previousRefreshTokenHash: text('previous_refresh_token_hash'),
+    previousRefreshTokenValidUntil: timestamp('previous_refresh_token_valid_until', { withTimezone: true }),
     // E2EE device identity (Phase 5A §4/§5, Phase 5B). Both nullable:
     // absent until this device runs E2EE setup, and — same as
     // identitySigningPublicKey on `users` — never touched by recovery.
@@ -146,6 +155,17 @@ export const deviceKeyPackages = pgTable(
 export const conversations = pgTable('conversations', {
   id: uuid('id').primaryKey().defaultRandom(),
   type: conversationTypeEnum('type').notNull(),
+  // Which MLS group the conversation currently uses. 0: none yet. Every
+  // (re)build of the group by a member device (see e2ee.resetGroup) moves
+  // it forward by exactly one, under a row lock, so two devices can never
+  // both establish a group for the same conversation — the race that used
+  // to leave the two sides in different groups. Opaque to the server
+  // otherwise: it never sees group state, only this counter.
+  mlsGeneration: integer('mls_generation').notNull().default(0),
+  // The device that established the current generation — lets that device
+  // confirm its own resetGroup went through when the response was lost.
+  // Not a foreign key: the builder signing out must not affect the group.
+  mlsGenerationDeviceId: uuid('mls_generation_device_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -191,9 +211,23 @@ export const messages = pgTable(
     recipientDeviceId: uuid('recipient_device_id').references(() => devices.id, { onDelete: 'cascade' }),
     messageType: messageTypeEnum('message_type').notNull().default('application'),
     ciphertext: bytea('ciphertext').notNull(),
+    // The conversation's mlsGeneration this row belongs to: the group a
+    // Welcome joins, or the group an application message was encrypted
+    // in. Null only for rows written before generations existed (all of
+    // which belong to generation 1).
+    mlsGeneration: integer('mls_generation'),
+    // SHA-256 of an application message's ciphertext, unique per
+    // conversation: MLS never produces the same ciphertext twice, so a second
+    // copy is the same send arriving again (a network-level retry of the
+    // request). Storing it twice made every receiver fail on the copy — its
+    // single-use key was already spent — and show "Unable to decrypt this
+    // message". Null for Welcomes (one Welcome is stored once per recipient)
+    // and for rows from before this column existed.
+    ciphertextSha256: bytea('ciphertext_sha256'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    uniqueIndex('messages_conversation_id_ciphertext_sha256_idx').on(table.conversationId, table.ciphertextSha256),
     index('messages_conversation_id_created_at_idx').on(table.conversationId, table.createdAt),
     index('messages_sender_device_id_idx').on(table.senderDeviceId),
     index('messages_recipient_device_id_idx').on(table.recipientDeviceId),

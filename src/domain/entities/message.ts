@@ -3,9 +3,12 @@ export type MessageDirection = 'outgoing' | 'incoming';
 /**
  * `decryption_failed` must always render as an explicit "can't display
  * this message" state — never a fallback to any other content. See the
- * Phase 6 report's security rule on this.
+ * Phase 6 report's security rule on this. `unavailable` is the same rule
+ * for messages this device can never have keys for (sent before it joined
+ * the conversation's current group, or its own message whose local copy
+ * is gone) — not an error, so it isn't shown as one.
  */
-export type MessageStatus = 'sending' | 'sent' | 'failed' | 'decrypted' | 'decryption_failed';
+export type MessageStatus = 'sending' | 'sent' | 'failed' | 'decrypted' | 'decryption_failed' | 'unavailable';
 
 export type MessageKind = 'text' | 'voice';
 

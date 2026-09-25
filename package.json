@@ -44,7 +44,8 @@
     "prebuild": "expo prebuild",
     "typecheck": "tsc --noEmit",
     "doctor": "expo-doctor",
-    "licenses": "node scripts/generate-licenses.mjs"
+    "licenses": "node scripts/generate-licenses.mjs",
+    "test": "node --test \"src/**/*.test.ts\""
   },
   "private": true
 }

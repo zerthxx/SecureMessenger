@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
+
 import { TRPCError } from '@trpc/server';
-import { and, asc, desc, eq, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
@@ -51,6 +53,46 @@ const base64Bytes = z.string().refine(
   },
   { message: 'Expected non-empty base64-encoded bytes' },
 );
+
+/**
+ * A device other devices may address a Welcome to: signed in (not revoked,
+ * refresh token not expired — an expired one can never come back without a
+ * new login, which is a new device row) and finished E2EE setup.
+ * Previously only `revokedAt` was checked, so a device abandoned without
+ * signing out (reinstall, wiped phone) stayed "active" and kept soaking up
+ * Welcomes and KeyPackages until its session TTL passed.
+ */
+function isAddressableDevice(now: Date) {
+  return and(
+    isNull(devices.revokedAt),
+    isNotNull(devices.mlsCredentialPublicKey),
+    or(isNull(devices.refreshTokenExpiresAt), gt(devices.refreshTokenExpiresAt, now)),
+  );
+}
+
+/**
+ * KeyPackages older than this are never handed out and are deleted when
+ * seen. OpenMLS gives a KeyPackage a 12-week lifetime and rejects adding an
+ * expired one; the app used to publish exactly one batch per device, so
+ * after ~84 days a device became impossible to add to any conversation.
+ */
+export const KEY_PACKAGE_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
+
+/** What `sendMessage` rejects with when the sender encrypted for a group the conversation no longer uses. */
+export const STALE_GROUP_GENERATION = 'STALE_GROUP_GENERATION';
+
+export const UPDATE_REQUIRED = 'This conversation now needs the latest version of SecureMessenger. Please update the app.';
+
+async function assertMember(ctx: Pick<Context, 'db'> & { user: { id: string } }, conversationId: string): Promise<void> {
+  const [membership] = await ctx.db
+    .select({ userId: conversationMembers.userId })
+    .from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, ctx.user.id)))
+    .limit(1);
+  if (!membership) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Not a member of this conversation.' });
+  }
+}
 
 /**
  * `sinceCreatedAt` makes a fetch incremental: only rows created at or after
@@ -186,10 +228,26 @@ export const e2eeRouter = router({
           .select({ id: deviceKeyPackages.id, publicKeyPackage: deviceKeyPackages.publicKeyPackage })
           .from(deviceKeyPackages)
           .innerJoin(devices, eq(devices.id, deviceKeyPackages.deviceId))
-          .where(and(eq(deviceKeyPackages.deviceId, input.targetDeviceId), isNull(devices.revokedAt)))
+          .where(
+            and(
+              eq(deviceKeyPackages.deviceId, input.targetDeviceId),
+              gt(deviceKeyPackages.createdAt, new Date(Date.now() - KEY_PACKAGE_MAX_AGE_MS)),
+              isAddressableDevice(new Date()),
+            ),
+          )
           .orderBy(asc(deviceKeyPackages.createdAt))
           .limit(1)
           .for('update', { of: deviceKeyPackages, skipLocked: true });
+
+        // Expired ones can never be used; drop them so they stop counting as available.
+        await tx
+          .delete(deviceKeyPackages)
+          .where(
+            and(
+              eq(deviceKeyPackages.deviceId, input.targetDeviceId),
+              lt(deviceKeyPackages.createdAt, new Date(Date.now() - KEY_PACKAGE_MAX_AGE_MS)),
+            ),
+          );
 
         if (!row) {
           return { keyPackage: null };
@@ -246,7 +304,7 @@ export const e2eeRouter = router({
 
         const otherMembers = alias(conversationMembers, 'other_members_cc');
         const [existing] = await tx
-          .select({ conversationId: conversations.id })
+          .select({ conversationId: conversations.id, groupGeneration: conversations.mlsGeneration })
           .from(conversationMembers)
           .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
           .innerJoin(
@@ -257,7 +315,7 @@ export const e2eeRouter = router({
           .limit(1);
 
         if (existing) {
-          return { conversationId: existing.conversationId };
+          return { conversationId: existing.conversationId, groupGeneration: existing.groupGeneration };
         }
 
         const [conversation] = await tx
@@ -274,7 +332,7 @@ export const e2eeRouter = router({
           { conversationId: conversation.id, userId: input.otherUserId },
         ]);
 
-        return { conversationId: conversation.id };
+        return { conversationId: conversation.id, groupGeneration: 0 };
       });
     }),
 
@@ -296,6 +354,7 @@ export const e2eeRouter = router({
       .select({
         conversationId: conversations.id,
         createdAt: conversations.createdAt,
+        mlsGeneration: conversations.mlsGeneration,
         otherUserId: users.id,
         otherUsername: users.username,
         otherDisplayName: users.displayName,
@@ -313,6 +372,9 @@ export const e2eeRouter = router({
     return rows.map((row) => ({
       conversationId: row.conversationId,
       createdAt: row.createdAt.toISOString(),
+      // Which generation of the conversation's MLS group is current (see
+      // resetGroup); 0 means none yet. Older app versions ignore it.
+      groupGeneration: row.mlsGeneration,
       otherUser: { id: row.otherUserId, username: row.otherUsername, displayName: row.otherDisplayName },
     }));
   }),
@@ -332,6 +394,13 @@ export const e2eeRouter = router({
         // Required for 'welcome' (single addressed device), must be
         // absent for 'application' (any conversation member may fetch it).
         recipientDeviceId: z.string().uuid().optional(),
+        // The group generation an application message was encrypted in.
+        // When given, the message is refused (STALE_GROUP_GENERATION) if the
+        // conversation has moved on to another group, so the sender
+        // re-encrypts it for the current one instead of every other device
+        // storing it as undecryptable. Omitted by app versions from before
+        // generations existed.
+        mlsGeneration: z.number().int().min(1).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -355,19 +424,71 @@ export const e2eeRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'recipientDeviceId is required for welcome messages.' });
       }
 
-      const [message] = await ctx.db
-        .insert(messages)
-        .values({
-          conversationId: input.conversationId,
-          senderDeviceId: ctx.device.id,
-          recipientDeviceId: input.recipientDeviceId ?? null,
-          messageType: input.messageType,
-          ciphertext: Buffer.from(input.ciphertext, 'base64'),
-        })
-        .returning({ id: messages.id, createdAt: messages.createdAt });
+      // FOR SHARE: concurrent sends don't wait for each other, but resetGroup
+      // (FOR UPDATE) can't move the generation between this check and the
+      // insert — each message lands wholly before or after a group change.
+      const ciphertext = Buffer.from(input.ciphertext, 'base64');
+      // Idempotent for application messages: the same ciphertext sent again
+      // (a network-level retry of this request) gets the original row back
+      // instead of a second copy, which every receiver would have failed to
+      // decrypt. Checked before the generation check, so a retry arriving
+      // after a group change still resolves to the original. See schema.ts
+      // `ciphertextSha256`.
+      const ciphertextSha256 = input.messageType === 'application' ? createHash('sha256').update(ciphertext).digest() : null;
+      const findOriginal = async (db: Pick<Context['db'], 'select'>) => {
+        if (!ciphertextSha256) return undefined;
+        const [original] = await db
+          .select({ id: messages.id, createdAt: messages.createdAt })
+          .from(messages)
+          .where(and(eq(messages.conversationId, input.conversationId), eq(messages.ciphertextSha256, ciphertextSha256)))
+          .limit(1);
+        return original ? { ...original, duplicate: true } : undefined;
+      };
+
+      const message = await ctx.db.transaction(async (tx) => {
+        const earlier = await findOriginal(tx);
+        if (earlier) return earlier;
+
+        const [conversation] = await tx
+          .select({ mlsGeneration: conversations.mlsGeneration })
+          .from(conversations)
+          .where(eq(conversations.id, input.conversationId))
+          .for('share');
+        if (input.mlsGeneration !== undefined) {
+          if (!conversation || conversation.mlsGeneration !== input.mlsGeneration) {
+            throw new TRPCError({ code: 'CONFLICT', message: STALE_GROUP_GENERATION });
+          }
+        } else if (input.messageType === 'application' && conversation && conversation.mlsGeneration > 1) {
+          // An app version from before generations, writing into a group
+          // this conversation has already replaced: nobody could decrypt
+          // it. Refusing makes that version show "failed to send" instead
+          // of the other side silently getting an unreadable message.
+          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: UPDATE_REQUIRED });
+        }
+        const [inserted] = await tx
+          .insert(messages)
+          .values({
+            conversationId: input.conversationId,
+            senderDeviceId: ctx.device.id,
+            recipientDeviceId: input.recipientDeviceId ?? null,
+            messageType: input.messageType,
+            ciphertext,
+            ciphertextSha256,
+            mlsGeneration: input.mlsGeneration ?? null,
+          })
+          .onConflictDoNothing({ target: [messages.conversationId, messages.ciphertextSha256] })
+          .returning({ id: messages.id, createdAt: messages.createdAt });
+        // Nothing inserted: an identical send committed concurrently.
+        return inserted ? { ...inserted, duplicate: false } : findOriginal(tx);
+      });
 
       if (!message) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to store message.' });
+      }
+      if (message.duplicate) {
+        // Already stored and announced the first time round.
+        ctx.log.info({ conversationId: input.conversationId, messageId: message.id }, 'duplicate send ignored');
+        return { messageId: message.id, createdAt: message.createdAt.toISOString() };
       }
 
       // Content-free "sync now" hint to connected devices, so an open chat
@@ -419,11 +540,14 @@ export const e2eeRouter = router({
       .select({
         id: messages.id,
         senderDeviceId: messages.senderDeviceId,
+        senderUserId: devices.userId,
         messageType: messages.messageType,
         ciphertext: messages.ciphertext,
+        mlsGeneration: messages.mlsGeneration,
         createdAt: messages.createdAt,
       })
       .from(messages)
+      .innerJoin(devices, eq(devices.id, messages.senderDeviceId))
       .where(
         and(
           eq(messages.conversationId, input.conversationId),
@@ -436,8 +560,13 @@ export const e2eeRouter = router({
     return rows.map((row) => ({
       id: row.id,
       senderDeviceId: row.senderDeviceId,
+      // Lets a device tell its own account's other devices' messages apart
+      // from the other member's. Additive; older clients ignore it.
+      senderUserId: row.senderUserId,
       messageType: row.messageType,
       ciphertext: row.ciphertext.toString('base64'),
+      // Rows written before generations existed all belong to generation 1.
+      mlsGeneration: row.mlsGeneration ?? 1,
       createdAt: row.createdAt.toISOString(),
     }));
   }),
@@ -470,7 +599,157 @@ export const e2eeRouter = router({
     const rows = await ctx.db
       .select({ id: devices.id })
       .from(devices)
-      .where(and(eq(devices.userId, input.userId), isNull(devices.revokedAt), isNotNull(devices.mlsCredentialPublicKey)));
+      .where(and(eq(devices.userId, input.userId), isAddressableDevice(new Date())));
     return rows.map((r) => r.id);
   }),
+
+  /**
+   * Every addressable device (see isAddressableDevice) of every member of a
+   * conversation, with its MLS credential key — what a device needs to
+   * build the conversation's group for all of them, and to notice a device
+   * that has since signed out but is still in the group. Public keys only;
+   * members already learn each other's credentials from the group itself.
+   */
+  listConversationDevices: protectedProcedure
+    .input(z.object({ conversationId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      enforceRateLimit(`e2ee:listConversationDevices:device:${ctx.device.id}`, 120, 5 * 60 * 1000);
+      await assertMember(ctx, input.conversationId);
+
+      const rows = await ctx.db
+        .select({ deviceId: devices.id, userId: devices.userId, credentialPublicKey: devices.mlsCredentialPublicKey })
+        .from(devices)
+        .innerJoin(conversationMembers, eq(conversationMembers.userId, devices.userId))
+        .where(and(eq(conversationMembers.conversationId, input.conversationId), isAddressableDevice(new Date())));
+
+      return rows.flatMap((row) =>
+        row.credentialPublicKey
+          ? [{ deviceId: row.deviceId, userId: row.userId, credentialPublicKey: row.credentialPublicKey.toString('base64') }]
+          : [],
+      );
+    }),
+
+  /**
+   * How many usable KeyPackages this device still has published. The app
+   * tops the pool up when this runs low — it used to publish one batch per
+   * device, ever, so a device that had been added to enough conversations
+   * (or failed attempts) could never be added to another one.
+   */
+  keyPackageStatus: protectedProcedure.query(async ({ ctx }) => {
+    const [row] = await ctx.db
+      .select({ available: sql<number>`count(*)::int` })
+      .from(deviceKeyPackages)
+      .where(
+        and(
+          eq(deviceKeyPackages.deviceId, ctx.device.id),
+          gt(deviceKeyPackages.createdAt, new Date(Date.now() - KEY_PACKAGE_MAX_AGE_MS)),
+        ),
+      );
+    return { available: row?.available ?? 0 };
+  }),
+
+  /**
+   * Establishes the conversation's MLS group — for the first time, or
+   * again — as the next generation: one Welcome (from a single commit that
+   * adds every device, see mls-core's rebuild_group) stored for each
+   * device that was included.
+   *
+   * This is the only way a group comes into existence, and it is
+   * serialized: the conversation row is locked and `expectedGeneration`
+   * must still be current, so of two devices racing to set up (or repair)
+   * the same conversation exactly one wins; the other gets `{ ok: false }`
+   * with the current generation and joins the winner's group from its
+   * Welcome. That race used to leave a chat's two members in two different
+   * groups for good.
+   *
+   * A device rebuilds when the group is unusable for it: never set up, a
+   * stale or forked copy, a device of either member that isn't in it yet,
+   * or a signed-out device still in it (so an ended session stops being
+   * able to decrypt new messages). Every generation is a fresh MLS group
+   * with fresh keys; nothing about MLS itself changes.
+   */
+  resetGroup: protectedProcedure
+    .input(
+      z.object({
+        conversationId: z.string().uuid(),
+        expectedGeneration: z.number().int().min(0),
+        welcome: base64Bytes,
+        recipientDeviceIds: z.array(z.string().uuid()).min(1).max(50),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      enforceRateLimit(`e2ee:resetGroup:device:${ctx.device.id}`, 30, 60 * 60 * 1000);
+      await assertCallerDeviceActive(ctx);
+      await assertMember(ctx, input.conversationId);
+
+      const recipientDeviceIds = [...new Set(input.recipientDeviceIds)];
+      if (recipientDeviceIds.includes(ctx.device.id)) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'A device does not send itself a Welcome.' });
+      }
+
+      const result = await ctx.db.transaction(async (tx) => {
+        const [conversation] = await tx
+          .select({ mlsGeneration: conversations.mlsGeneration, builtBy: conversations.mlsGenerationDeviceId })
+          .from(conversations)
+          .where(eq(conversations.id, input.conversationId))
+          .for('update');
+        if (!conversation) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Conversation not found.' });
+        }
+        if (conversation.mlsGeneration !== input.expectedGeneration) {
+          // `builtByThisDevice`: a retry of a call whose response was lost
+          // finds out that its first attempt is the one that went through.
+          return {
+            ok: false as const,
+            generation: conversation.mlsGeneration,
+            builtByThisDevice: conversation.builtBy === ctx.device.id,
+          };
+        }
+
+        // Welcomes only go to addressable devices of this conversation's members.
+        const allowed = await tx
+          .select({ id: devices.id })
+          .from(devices)
+          .innerJoin(conversationMembers, eq(conversationMembers.userId, devices.userId))
+          .where(
+            and(
+              eq(conversationMembers.conversationId, input.conversationId),
+              inArray(devices.id, recipientDeviceIds),
+              isAddressableDevice(new Date()),
+            ),
+          );
+        if (allowed.length !== recipientDeviceIds.length) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Every recipient must be an active device of a conversation member.' });
+        }
+
+        const generation = conversation.mlsGeneration + 1;
+        const welcome = Buffer.from(input.welcome, 'base64');
+        await tx.insert(messages).values(
+          recipientDeviceIds.map((recipientDeviceId) => ({
+            conversationId: input.conversationId,
+            senderDeviceId: ctx.device.id,
+            recipientDeviceId,
+            messageType: 'welcome' as const,
+            ciphertext: welcome,
+            mlsGeneration: generation,
+          })),
+        );
+        await tx
+          .update(conversations)
+          .set({ mlsGeneration: generation, mlsGenerationDeviceId: ctx.device.id })
+          .where(eq(conversations.id, input.conversationId));
+        return { ok: true as const, generation };
+      });
+
+      if (result.ok) {
+        ctx.log.info(
+          { conversationId: input.conversationId, generation: result.generation, recipients: recipientDeviceIds.length },
+          'conversation group established',
+        );
+        publishConversationUpdated({ conversationId: input.conversationId, senderDeviceId: ctx.device.id, recipientDeviceId: null }).catch(
+          (err) => ctx.log.warn({ err }, 'realtime conversation update failed'),
+        );
+      }
+      return result;
+    }),
 });

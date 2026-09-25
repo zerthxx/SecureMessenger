@@ -57,7 +57,14 @@ import { openDatabaseSync, type SQLiteDatabase } from 'expo-sqlite';
  */
 
 export type MessageDirection = 'outgoing' | 'incoming';
-export type MessageStatus = 'sending' | 'sent' | 'failed' | 'decrypted' | 'decryption_failed';
+/**
+ * `unavailable`: a message this device can never decrypt by design — sent
+ * before this device joined the conversation's current group, or this
+ * device's own message whose local copy is gone (MLS erases a sent
+ * message's key). Kept apart from `decryption_failed`, which means
+ * something that should have been readable was not.
+ */
+export type MessageStatus = 'sending' | 'sent' | 'failed' | 'decrypted' | 'decryption_failed' | 'unavailable';
 export type MessageKind = 'text' | 'voice';
 export type AudioState = 'idle' | 'downloading' | 'downloaded' | 'failed';
 
@@ -427,7 +434,7 @@ export function updateMessageStatus(owner: string, id: string, status: MessageSt
 }
 
 /** Stamps the server-issued media id onto a voice message once its blob upload confirms — see ChatContext's `attemptSendVoice`. */
-export function setVoiceMediaId(owner: string, id: string, mediaId: string): void {
+export function setVoiceMediaId(owner: string, id: string, mediaId: string | null): void {
   assertOwnerUnchanged(owner);
   getDb().runSync(`UPDATE messages SET audio_media_id = ? WHERE id = ? AND owner_user_id = ?`, [mediaId, id, owner]);
 }
@@ -510,6 +517,8 @@ export function refreshConversationPreview(owner: string, conversationId: string
   const preview =
     latest.status === 'decryption_failed'
       ? 'Unable to decrypt this message'
+      : latest.status === 'unavailable'
+        ? 'Message not available on this device'
       : latest.status === 'failed'
         ? isVoice
           ? 'Voice message failed to send'
@@ -525,6 +534,32 @@ export function refreshConversationPreview(owner: string, conversationId: string
     conversationId,
     owner,
   ]);
+}
+
+/**
+ * Which generation of the conversation's MLS group (see groupSync.ts) this
+ * account's local copy is. 0: none. A conversation joined before
+ * generations existed is on generation 1 — the server numbers those the
+ * same way.
+ */
+export function getLocalGroupGeneration(owner: string, conversationId: string): number {
+  const stored = getAppState(`mlsGeneration:${owner}:${conversationId}`);
+  if (stored !== null) return Number(stored) || 0;
+  return isConversationJoined(owner, conversationId) ? 1 : 0;
+}
+
+/** Records the local group's generation; also sets the joined flag the chat list reads. */
+export function setLocalGroupGeneration(owner: string, conversationId: string, generation: number): void {
+  assertOwnerUnchanged(owner);
+  const database = getDb();
+  database.withTransactionSync(() => {
+    setAppState(`mlsGeneration:${owner}:${conversationId}`, String(generation));
+    database.runSync(`UPDATE conversations SET group_joined = ? WHERE id = ? AND owner_user_id = ?`, [
+      generation > 0 ? 1 : 0,
+      conversationId,
+      owner,
+    ]);
+  });
 }
 
 export function getAppState(key: string): string | null {

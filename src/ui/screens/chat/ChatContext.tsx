@@ -4,33 +4,52 @@ import { AppState } from 'react-native';
 import type { Conversation } from '@/domain/entities';
 import { base64ToBytes, bytesToBase64 } from '@/infrastructure/crypto/base64';
 import {
-  addMemberToGroup,
-  createGroup,
+  coversOtherMembers,
+  classifyMlsError,
+  isFromOwnAccount,
+  isPermanentWelcomeFailure,
+  isStaleGenerationError,
+  mayRebuildNow,
+  orderForSync,
+  pickWelcome,
+  planRow,
+  rebuildReason,
+  rebuildTargets,
+  rebuildWasAccepted,
+  sawUnusableGroup,
+  signedOutMemberKeys,
+  type ConversationDevice,
+} from '@/infrastructure/crypto/groupSync';
+import {
   decryptMessage,
+  deleteGroup,
   encryptMessage,
   ensureMlsCoreInitialized,
   generateDeviceCredential,
   generateIdentityKey,
   generateKeyPackages,
-  joinGroupFromWelcome,
+  groupMemberSignatureKeys,
+  joinGroupReplacing,
+  rebuildGroup,
 } from '@/infrastructure/crypto/mlsCore';
 import { uuidToBytes } from '@/infrastructure/crypto/uuid';
 import { e2eeApi, getApiErrorMessage, usersApi } from '@/infrastructure/network/trpcClient';
 import { downloadVoiceBlob, uploadVoiceBlob } from '@/infrastructure/network/voiceMediaApi';
 import {
   getAppState,
+  getConversation,
+  getLocalGroupGeneration,
   getMessageById,
   getMessageStoreOwner,
   getStoredMessageStates,
   getSyncCursor,
   initMessageStore,
-  isConversationJoined,
   listLocalConversations,
-  markConversationJoined,
   recordMessage,
   reconcileSentMessageId,
   refreshConversationPreview,
   setAppState,
+  setLocalGroupGeneration,
   setMessageStoreOwner,
   setSyncCursor,
   setVoiceMediaId,
@@ -47,9 +66,18 @@ import { useNotifications } from '@/ui/screens/settings/NotificationsProvider';
 import { notifyConversationChanged } from './conversationMessages';
 
 const KEY_PACKAGE_BATCH_SIZE = 20;
+/**
+ * Below this many published KeyPackages, setup publishes another batch.
+ * Every conversation (re)built with this device in it uses one; the pool
+ * used to be published once per device and never refilled, so a device
+ * eventually became impossible to add to any conversation.
+ */
+const KEY_PACKAGE_LOW_WATER = 10;
 const CONVERSATIONS_POLL_MS = 6000;
 /** With the realtime socket connected, only every Nth list poll runs (30 s): changes arrive as hints instead. */
 const ONLINE_POLL_EVERY = 5;
+/** How often a conversation's group membership is compared with its members' signed-in devices. */
+const MEMBERSHIP_CHECK_MS = 5 * 60 * 1000;
 
 /**
  * How far before the newest already-processed message an incremental sync
@@ -131,6 +159,9 @@ function parseVoiceEnvelope(plaintext: string): VoiceEnvelope | null {
   return null;
 }
 
+/** A group (re)build that couldn't include the other person: they have no device ready to receive encrypted messages. */
+class PeerNotReadyError extends Error {}
+
 interface UserSearchResult {
   id: string;
   username: string;
@@ -176,6 +207,19 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   notifyContextRef.current.shouldPresentLocally = shouldPresentLocally;
   notifyContextRef.current.conversations = conversations;
 
+  /**
+   * Per-conversation group bookkeeping that doesn't need to survive a
+   * restart: the server's current generation as last seen (listConversations,
+   * createConversation, resetGroup and sync all refresh it), when this device
+   * last tried to rebuild each group, and when it last compared a group's
+   * members with the server's signed-in devices.
+   */
+  const serverGenerationRef = useRef(new Map<string, number>());
+  const lastRebuildAtRef = useRef(new Map<string, number>());
+  const membershipCheckedAtRef = useRef(new Map<string, number>());
+  /** This install's MLS credential key (base64) — how it recognises its own entry in the server's device lists. */
+  const ownCredentialKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
     initMessageStore();
   }, []);
@@ -192,24 +236,32 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   // account happens to be live by the time that request resolves.
   useEffect(() => {
     setMessageStoreOwner(user?.id ?? null);
+    serverGenerationRef.current.clear();
+    lastRebuildAtRef.current.clear();
+    membershipCheckedAtRef.current.clear();
+    ownCredentialKeyRef.current = null;
   }, [user?.id]);
 
   /**
-   * Runs once per authenticated session: identity key, device
-   * credential, and an initial KeyPackage batch, all idempotent (see
-   * each function's own doc comments — generateIdentityKey/
+   * Keeps this device's published KeyPackage pool from running dry — each
+   * conversation (re)built with this device in it consumes one, and an
+   * empty pool makes the device impossible to add. Replaces a local
+   * "published once" flag that never refilled the pool.
+   */
+  const topUpKeyPackages = useCallback(async (): Promise<void> => {
+    const { available } = await e2eeApi.keyPackageStatus();
+    if (available >= KEY_PACKAGE_LOW_WATER) return;
+    const keyPackages = await generateKeyPackages(KEY_PACKAGE_BATCH_SIZE);
+    await e2eeApi.publishKeyPackages({ keyPackages: keyPackages.map(bytesToBase64) });
+  }, []);
+
+  /**
+   * Runs once per authenticated session: identity key, device credential,
+   * and a KeyPackage top-up, all idempotent (generateIdentityKey/
    * generateDeviceCredential no-op if already set locally,
    * registerIdentityKey/registerDeviceCredential no-op if already set
-   * server-side, and the KeyPackage batch is gated on a local flag so
-   * app restarts don't keep growing the published pool).
-   *
-   * The KeyPackage-published flag is keyed by the server device id, not
-   * a flat key — the local SQLite cache is one file per app *install*,
-   * not per account, so two different accounts signing in on the same
-   * device (switching accounts, a QA device, etc.) would otherwise share
-   * one global flag: the second account to run this would see the
-   * first's "already published" flag and skip publishing its own
-   * KeyPackages entirely, leaving it permanently unaddable to any group.
+   * server-side, and the top-up only publishes when the server reports the
+   * pool running low).
    *
    * Reentrancy guard (`inFlightRef`): this is invoked from a `useEffect`
    * keyed on `[status, ensureE2eeSetup]`, and again from the UI's retry
@@ -245,13 +297,9 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           credentialPublicKey: bytesToBase64(credential.credentialPublicKey),
           crossSignature: bytesToBase64(credential.crossSignature),
         });
+        ownCredentialKeyRef.current = bytesToBase64(credential.credentialPublicKey);
 
-        const publishedFlagKey = `keyPackagesPublished:${deviceId}`;
-        if (getAppState(publishedFlagKey) !== 'true') {
-          const keyPackages = await generateKeyPackages(KEY_PACKAGE_BATCH_SIZE);
-          await e2eeApi.publishKeyPackages({ keyPackages: keyPackages.map(bytesToBase64) });
-          setAppState(publishedFlagKey, 'true');
-        }
+        await topUpKeyPackages();
 
         setE2eeError(null);
         setE2eeReady(true);
@@ -266,22 +314,61 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     const promise = run();
     inFlightRef.current = promise;
     return promise;
-  }, [deviceId, user]);
+  }, [deviceId, user, topUpKeyPackages]);
 
   /**
-   * Looks for a Welcome message addressed to this device and, for
-   * already-joined groups, decrypts any new application messages. Only
-   * ever called through `pollConversation`, which guarantees a single
+   * Fetches and decrypts a received voice message's audio blob and caches
+   * the decrypted bytes to a local file. The blob is MLS ciphertext from
+   * the same sender, sent just before the envelope that references it, so
+   * it has to be decrypted soon after the envelope: MLS keeps only a few
+   * skipped message keys per sender, and none once the conversation moves
+   * to a newer group. `syncConversation` therefore calls this right after
+   * recording a voice envelope; tapping a message whose audio couldn't be
+   * fetched then (offline) retries it. Decrypting the same ciphertext twice
+   * is not possible, so a message already downloading or downloaded is left
+   * alone.
+   */
+  const fetchVoiceAudio = useCallback(async (owner: string, conversationId: string, messageId: string): Promise<void> => {
+    const row = getMessageById(owner, messageId);
+    if (!row || row.kind !== 'voice' || !row.audioMediaId) return;
+    if (row.audioState === 'downloading' || row.audioState === 'downloaded') return;
+
+    updateVoiceAudio(owner, messageId, { audioState: 'downloading' });
+    notifyConversationChanged(conversationId);
+
+    try {
+      const blobCiphertext = await downloadVoiceBlob(conversationId, row.audioMediaId);
+      if (getMessageStoreOwner() !== owner) return;
+      const base64Audio = await decryptMessage(owner, uuidToBytes(conversationId), blobCiphertext);
+      if (getMessageStoreOwner() !== owner) return;
+      const uri = writeDownloadedAudio(owner, conversationId, row.audioMediaId, base64ToBytes(base64Audio));
+      if (getMessageStoreOwner() !== owner) return;
+      updateVoiceAudio(owner, messageId, { audioLocalUri: uri, audioState: 'downloaded' });
+    } catch {
+      if (getMessageStoreOwner() !== owner) return;
+      updateVoiceAudio(owner, messageId, { audioState: 'failed' });
+    }
+    if (getMessageStoreOwner() !== owner) return;
+    notifyConversationChanged(conversationId);
+  }, []);
+
+  /**
+   * Brings this device's copy of one conversation up to date: joins the
+   * newest Welcome addressed to it (replacing a stale or forked local
+   * group), then decrypts new application messages of its current group.
+   * See groupSync.ts for every rule applied to a row, and why.
+   *
+   * Only ever called through `runConversationSync`, which guarantees one
    * sync per conversation at a time; every non-idempotent step (join,
-   * decrypt) is still guarded by an "already processed" check against the
-   * local store first.
+   * decrypt) is still guarded by an "already processed" check first.
    *
    * Incremental: once a conversation has been synced, only rows from
    * shortly before the newest one already processed are fetched (see
    * SYNC_OVERLAP_MS), and rows already stored are skipped without any
-   * write. Measured on v0.7.0, re-downloading and re-writing the whole
-   * history on every 3-second poll cost ~2.4 MB and ~4.5 s of JS-thread
-   * time per minute with a 300-message chat open.
+   * write. The cursor only moves when every fetched row has been handled —
+   * a sync that stops early (a group this device isn't in yet, a transient
+   * native error) reads the same window again next time instead of
+   * skipping past rows it hasn't handled.
    *
    * Captures its own owner at entry (`owner`) and re-checks
    * `getMessageStoreOwner() === owner` after every `await` before
@@ -290,160 +377,357 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
    * whichever account is live by the time a later step runs. The
    * `assertOwnerUnchanged` inside each messageStore write is the same
    * guarantee's backstop, in case a future change here misses a check.
+   *
+   * Reports whether the device's copy looked unusable (a message of its
+   * current group it could not read, or one from a newer group it isn't
+   * in) so the caller can rebuild.
    */
   const syncConversation = useCallback(
-    async (conversationId: string): Promise<void> => {
+    async (conversationId: string): Promise<{ unusable: boolean } | null> => {
       const owner = getMessageStoreOwner();
-      if (!deviceId || !owner) return;
+      if (!deviceId || !owner) return null;
       const cursor = getSyncCursor(owner, conversationId);
       const sinceCreatedAt = cursor ? new Date(Date.parse(cursor) - SYNC_OVERLAP_MS).toISOString() : undefined;
-      let rows: Awaited<ReturnType<typeof e2eeApi.fetchMessages>>;
+      let fetched: Awaited<ReturnType<typeof e2eeApi.fetchMessages>>;
       try {
-        rows = await e2eeApi.fetchMessages(sinceCreatedAt ? { conversationId, sinceCreatedAt } : { conversationId });
+        fetched = await e2eeApi.fetchMessages(sinceCreatedAt ? { conversationId, sinceCreatedAt } : { conversationId });
       } catch {
-        return; // network/server failure this cycle — next poll will retry
+        return null; // network/server failure this cycle — next poll will retry
       }
-      if (getMessageStoreOwner() !== owner) return;
+      if (getMessageStoreOwner() !== owner) return null;
 
+      const rows = orderForSync(fetched);
       const groupIdBytes = uuidToBytes(conversationId);
       const stored = getStoredMessageStates(
         owner,
         rows.map((row) => row.id),
       );
+      let localGeneration = getLocalGroupGeneration(owner, conversationId);
+      const welcomeProcessedKey = (id: string) => `welcome_processed:${id}`;
+      const welcome = pickWelcome(rows, localGeneration, (row) => getAppState(welcomeProcessedKey(row.id)) === '1');
+      const newestGeneration = rows.reduce((max, row) => Math.max(max, row.mlsGeneration), 0);
+      if (newestGeneration > (serverGenerationRef.current.get(conversationId) ?? 0)) {
+        serverGenerationRef.current.set(conversationId, newestGeneration);
+      }
+
       // Only a sync that actually wrote something re-renders the chat.
       let changed = false;
-      let newestProcessedAt: string | null = null;
+      let complete = true;
+      let notMember = false;
+      const failedGenerations: number[] = [];
+      const own = { deviceId, userId: owner };
 
-      for (const row of rows) {
-        if (getMessageStoreOwner() !== owner) return;
+      const recordUnreadable = (row: (typeof rows)[number], status: 'unavailable' | 'decryption_failed') => {
+        recordMessage(owner, {
+          id: row.id,
+          conversationId,
+          senderDeviceId: row.senderDeviceId,
+          direction: isFromOwnAccount(row, own) ? 'outgoing' : 'incoming',
+          status,
+          plaintext: null,
+          createdAt: row.createdAt,
+          localCreatedAt: row.createdAt,
+        });
+        changed = true;
+      };
 
-        if (row.messageType === 'welcome') {
-          if (getAppState(`welcome_processed:${row.id}`) !== '1') {
-            try {
-              await joinGroupFromWelcome(base64ToBytes(row.ciphertext));
-              if (getMessageStoreOwner() !== owner) return;
-              markConversationJoined(owner, conversationId);
-            } catch {
-              // Already joined (e.g. this device processed it in an
-              // earlier session before the flag was recorded) or a
-              // malformed Welcome — either way, nothing more to do with
-              // this specific message.
-            }
-            if (getMessageStoreOwner() !== owner) return;
-            setAppState(`welcome_processed:${row.id}`, '1');
-            changed = true;
-          }
-          newestProcessedAt = row.createdAt;
-          continue;
-        }
+      rowLoop: for (const row of rows) {
+        if (getMessageStoreOwner() !== owner) return null;
 
-        // application message
-        //
         // `stored` was read before this loop's first await. A row it doesn't
         // list as processed may have been written since (e.g. our own send
         // confirming under its server id), so that row is re-read
-        // synchronously right before acting on it — the same guard the
-        // per-row lookup always gave.
+        // synchronously right before acting on it.
         let existing = stored.get(row.id) ?? null;
-        if (!existing || existing.status === 'sending') {
+        if (row.messageType === 'application' && (!existing || existing.status === 'sending')) {
           const fresh = getMessageById(owner, row.id);
           existing = fresh ? { status: fresh.status, createdAt: fresh.createdAt } : null;
         }
-        if (existing && existing.status !== 'sending') {
-          // Already decrypted (or recorded as undecryptable), so never
-          // decrypted again. The only thing the server can still correct is
-          // the ordering timestamp; content, status, kind and audio metadata
-          // stay exactly as stored.
-          if (existing.createdAt !== row.createdAt) {
-            updateMessageCreatedAt(owner, row.id, row.createdAt);
+
+        const action = planRow(row, {
+          localGeneration,
+          targetGeneration: welcome?.mlsGeneration ?? 0,
+          welcomeToJoinId: welcome?.id ?? null,
+          ownDeviceId: deviceId,
+          stored: existing !== null && existing.status !== 'sending',
+        });
+
+        switch (action) {
+          case 'join': {
+            try {
+              await joinGroupReplacing(owner, base64ToBytes(row.ciphertext));
+              if (getMessageStoreOwner() !== owner) return null;
+              setLocalGroupGeneration(owner, conversationId, row.mlsGeneration);
+              localGeneration = row.mlsGeneration;
+            } catch (err) {
+              if (getMessageStoreOwner() !== owner) return null;
+              if (!isPermanentWelcomeFailure(err)) {
+                // Storage hiccup: try this Welcome again on the next sync.
+                complete = false;
+                break rowLoop;
+              }
+              // Not usable by this device (its KeyPackage is gone, e.g. app
+              // data was cleared). Never retried; the rows of its group show
+              // up as `not_member` below and this device rebuilds.
+            }
+            setAppState(welcomeProcessedKey(row.id), '1');
             changed = true;
+            break;
           }
-          newestProcessedAt = row.createdAt;
-          continue;
-        }
-
-        if (row.senderDeviceId === deviceId) {
-          // Our own message, not found locally (e.g. local cache lost).
-          // MLS erases a sent generation's key material right after
-          // use — this device cannot recover its own past plaintext.
-          recordMessage(owner, {
-            id: row.id,
-            conversationId,
-            senderDeviceId: row.senderDeviceId,
-            direction: 'outgoing',
-            status: 'decryption_failed',
-            plaintext: null,
-            createdAt: row.createdAt,
-            localCreatedAt: row.createdAt,
-          });
-          changed = true;
-          newestProcessedAt = row.createdAt;
-          continue;
-        }
-
-        try {
-          const plaintext = await decryptMessage(groupIdBytes, base64ToBytes(row.ciphertext));
-          if (getMessageStoreOwner() !== owner) return;
-          const voiceEnvelope = parseVoiceEnvelope(plaintext);
-          recordMessage(owner, {
-            id: row.id,
-            conversationId,
-            senderDeviceId: row.senderDeviceId,
-            direction: 'incoming',
-            status: 'decrypted',
-            kind: voiceEnvelope ? 'voice' : 'text',
-            plaintext: voiceEnvelope ? null : plaintext,
-            audioMediaId: voiceEnvelope?.mediaId ?? null,
-            audioDurationMs: voiceEnvelope?.durationMs ?? null,
-            // Never downloaded yet — the receiving side fetches+decrypts
-            // the audio blob lazily, on first playback (downloadVoiceMessage).
-            audioState: voiceEnvelope ? 'idle' : null,
-            createdAt: row.createdAt,
-            localCreatedAt: row.createdAt,
-          });
-
-          const notify = notifyContextRef.current;
-          if (Date.parse(row.createdAt) >= notify.sessionStartedAt && notify.shouldPresentLocally()) {
-            const conversation = notify.conversations.find((c) => c.id === conversationId);
-            presentNewMessageNotification({
+          case 'skip_welcome':
+            if (getAppState(welcomeProcessedKey(row.id)) !== '1') setAppState(welcomeProcessedKey(row.id), '1');
+            break;
+          case 'already_stored':
+            // Already decrypted (or recorded as unreadable), so never
+            // decrypted again. The only thing the server can still correct is
+            // the ordering timestamp; content, status, kind and audio
+            // metadata stay exactly as stored.
+            if (existing && existing.createdAt !== row.createdAt) {
+              updateMessageCreatedAt(owner, row.id, row.createdAt);
+              changed = true;
+            }
+            break;
+          case 'old_generation':
+          case 'own_message_lost':
+            // Sent before this device joined the current group, or this
+            // device's own message whose local copy is gone: MLS never gives
+            // this device the keys for either. Not an error.
+            recordUnreadable(row, 'unavailable');
+            break;
+          case 'not_member':
+            // From a group this device isn't in. Leave the row (and the
+            // cursor) alone; the caller rebuilds the group.
+            notMember = true;
+            complete = false;
+            break rowLoop;
+          case 'decrypt': {
+            let plaintext: string;
+            try {
+              plaintext = await decryptMessage(owner, groupIdBytes, base64ToBytes(row.ciphertext));
+            } catch (err) {
+              if (getMessageStoreOwner() !== owner) return null;
+              switch (classifyMlsError(err)) {
+                case 'duplicate':
+                  // The same send stored twice (a network-level retry); the
+                  // first copy was decrypted and is shown. Nothing to add.
+                  continue rowLoop;
+                case 'own_message':
+                case 'past_epoch':
+                  recordUnreadable(row, 'unavailable');
+                  continue rowLoop;
+                case 'transient':
+                  complete = false;
+                  break rowLoop;
+                case 'no_group':
+                  // The local group is gone; rebuilding brings it back.
+                  failedGenerations.push(row.mlsGeneration);
+                  complete = false;
+                  break rowLoop;
+                case 'future_epoch':
+                case 'invalid':
+                  // Tampered, or this device's copy of the group is stale or
+                  // forked. Never fall back to displaying raw ciphertext or
+                  // any guessed content — record an explicit failure the UI
+                  // renders as such, and rebuild so later messages are
+                  // readable again.
+                  recordUnreadable(row, 'decryption_failed');
+                  failedGenerations.push(row.mlsGeneration);
+                  continue rowLoop;
+              }
+              continue rowLoop;
+            }
+            if (getMessageStoreOwner() !== owner) return null;
+            const voiceEnvelope = parseVoiceEnvelope(plaintext);
+            const outgoing = isFromOwnAccount(row, own);
+            recordMessage(owner, {
+              id: row.id,
               conversationId,
-              title: conversation?.otherDisplayName ?? 'SecureMessenger',
-              body: voiceEnvelope ? 'Voice message' : 'New message',
-            }).catch(() => {});
+              senderDeviceId: row.senderDeviceId,
+              direction: outgoing ? 'outgoing' : 'incoming',
+              status: 'decrypted',
+              kind: voiceEnvelope ? 'voice' : 'text',
+              plaintext: voiceEnvelope ? null : plaintext,
+              audioMediaId: voiceEnvelope?.mediaId ?? null,
+              audioDurationMs: voiceEnvelope?.durationMs ?? null,
+              audioState: voiceEnvelope ? 'idle' : null,
+              createdAt: row.createdAt,
+              localCreatedAt: row.createdAt,
+            });
+            changed = true;
+
+            const notify = notifyContextRef.current;
+            if (!outgoing && Date.parse(row.createdAt) >= notify.sessionStartedAt && notify.shouldPresentLocally()) {
+              const conversation = notify.conversations.find((c) => c.id === conversationId);
+              presentNewMessageNotification({
+                conversationId,
+                title: conversation?.otherDisplayName ?? 'SecureMessenger',
+                body: voiceEnvelope ? 'Voice message' : 'New message',
+              }).catch(() => {});
+            }
+            if (voiceEnvelope) {
+              await fetchVoiceAudio(owner, conversationId, row.id);
+              if (getMessageStoreOwner() !== owner) return null;
+            }
+            break;
           }
-        } catch {
-          // Tampered/invalid ciphertext, wrong epoch, or any other
-          // authentication failure. Never fall back to displaying raw
-          // ciphertext or any guessed content — record an explicit
-          // failure state the UI renders as such.
-          if (getMessageStoreOwner() !== owner) return;
-          recordMessage(owner, {
-            id: row.id,
-            conversationId,
-            senderDeviceId: row.senderDeviceId,
-            direction: 'incoming',
-            status: 'decryption_failed',
-            plaintext: null,
-            createdAt: row.createdAt,
-            localCreatedAt: row.createdAt,
-          });
         }
-        changed = true;
-        newestProcessedAt = row.createdAt;
       }
 
-      if (getMessageStoreOwner() !== owner) return;
-      // Rows arrive oldest first, so this is the newest one handled. The
-      // cursor only moves once every row up to it has been processed.
-      if (newestProcessedAt && (!cursor || newestProcessedAt > cursor)) {
-        setSyncCursor(owner, conversationId, newestProcessedAt);
+      if (getMessageStoreOwner() !== owner) return null;
+      const first = fetched[0];
+      if (complete && first) {
+        const newest = fetched.reduce((max, row) => (row.createdAt > max ? row.createdAt : max), first.createdAt);
+        if (!cursor || newest > cursor) setSyncCursor(owner, conversationId, newest);
       }
       if (changed) {
         refreshConversationPreview(owner, conversationId);
         notifyConversationChanged(conversationId);
       }
+      return { unusable: sawUnusableGroup({ notMember, failedGenerations, localGeneration }) };
+    },
+    [deviceId, fetchVoiceAudio],
+  );
+
+  /**
+   * (Re)builds the conversation's group as generation `expectedGeneration +
+   * 1`: one commit adding one fresh KeyPackage of every signed-in device of
+   * both members (this install excepted), one Welcome for all of them — see
+   * groupSync.ts. Returns true when this device's group is the one the
+   * server kept. If another device's rebuild won the race, this device's
+   * unpublished group is discarded and it joins the winner's on the next
+   * sync.
+   */
+  const rebuildConversationGroup = useCallback(
+    async (owner: string, conversationId: string, expectedGeneration: number): Promise<boolean> => {
+      const requireStillOwner = () => {
+        if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+      };
+      const ownCredential = ownCredentialKeyRef.current;
+      const conversation = getConversation(owner, conversationId);
+      if (!deviceId || !ownCredential || !conversation) return false;
+
+      const devices: ConversationDevice[] = await e2eeApi.listConversationDevices({ conversationId });
+      requireStillOwner();
+      const targets = rebuildTargets(devices, { deviceId, credentialPublicKey: ownCredential });
+      const members = [owner, conversation.otherUserId];
+      const keyed: { device: ConversationDevice; keyPackage: Uint8Array }[] = [];
+      const consumeFor = async (group: ConversationDevice[]) => {
+        for (const device of group) {
+          const { keyPackage } = await e2eeApi.consumeKeyPackage({ targetDeviceId: device.deviceId });
+          requireStillOwner();
+          if (keyPackage) keyed.push({ device, keyPackage: base64ToBytes(keyPackage) });
+        }
+      };
+      // The other person's devices first: if none of them is reachable the
+      // rebuild is abandoned before any of this account's own KeyPackages
+      // are used up for nothing.
+      await consumeFor(targets.filter((device) => device.userId !== owner));
+      if (!coversOtherMembers(keyed.map((k) => k.device.userId), members, owner)) {
+        throw new PeerNotReadyError(`${conversation.otherDisplayName}'s device isn't ready to receive encrypted messages yet. Try again shortly.`);
+      }
+      await consumeFor(targets.filter((device) => device.userId === owner));
+
+      const groupIdBytes = uuidToBytes(conversationId);
+      const rebuilt = await rebuildGroup(owner, groupIdBytes, keyed.map((k) => k.keyPackage));
+      requireStillOwner();
+      const recipientDeviceIds = rebuilt.included.flatMap((index) => {
+        const entry = keyed[index];
+        return entry ? [entry.device.deviceId] : [];
+      });
+
+      const request = { conversationId, expectedGeneration, welcome: bytesToBase64(rebuilt.welcome), recipientDeviceIds };
+      let response: Awaited<ReturnType<typeof e2eeApi.resetGroup>> | null = null;
+      for (let attempt = 0; attempt < 3 && !response; attempt++) {
+        try {
+          response = await e2eeApi.resetGroup(request);
+        } catch (err) {
+          // A lost response is retried with the same request: the server
+          // reports whether the first attempt already went through.
+          if (attempt === 2) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+        }
+      }
+      requireStillOwner();
+      if (!response) return false;
+
+      if (rebuildWasAccepted(response, expectedGeneration)) {
+        setLocalGroupGeneration(owner, conversationId, expectedGeneration + 1);
+        serverGenerationRef.current.set(conversationId, expectedGeneration + 1);
+        membershipCheckedAtRef.current.set(conversationId, Date.now());
+        return true;
+      }
+      serverGenerationRef.current.set(conversationId, response.generation);
+      await deleteGroup(owner, groupIdBytes);
+      requireStillOwner();
+      setLocalGroupGeneration(owner, conversationId, 0);
+      return false;
     },
     [deviceId],
+  );
+
+  /**
+   * After a sync: rebuilds the group if this device can't use it — see
+   * groupSync.rebuildReason. Also (every MEMBERSHIP_CHECK_MS) compares the
+   * group's members with the members' signed-in devices, so a device whose
+   * session was ended stops being able to decrypt new messages.
+   * Automatic rebuilds are rate-limited per conversation (mayRebuildNow);
+   * `userInitiated` (starting or opening a chat from search) is not, and
+   * surfaces a failure to the caller instead of retrying quietly later.
+   * Returns whether it rebuilt, so the caller syncs once more and picks up
+   * the other side's Welcome if another device won the race.
+   */
+  const maintainGroup = useCallback(
+    async (conversationId: string, syncResult: { unusable: boolean }, userInitiated: boolean): Promise<boolean> => {
+      const owner = getMessageStoreOwner();
+      if (!deviceId || !owner) return false;
+      const localGeneration = getLocalGroupGeneration(owner, conversationId);
+      let serverGeneration = serverGenerationRef.current.get(conversationId);
+      if (serverGeneration === undefined) {
+        const listed = (await e2eeApi.listConversations()).find((row) => row.conversationId === conversationId);
+        if (getMessageStoreOwner() !== owner || !listed) return false;
+        serverGeneration = listed.groupGeneration;
+        serverGenerationRef.current.set(conversationId, serverGeneration);
+      }
+
+      let signedOutMembers = 0;
+      const checkedAt = membershipCheckedAtRef.current.get(conversationId) ?? 0;
+      if (localGeneration > 0 && localGeneration === serverGeneration && Date.now() - checkedAt >= MEMBERSHIP_CHECK_MS) {
+        membershipCheckedAtRef.current.set(conversationId, Date.now());
+        const [devices, memberKeys] = await Promise.all([
+          e2eeApi.listConversationDevices({ conversationId }),
+          groupMemberSignatureKeys(owner, uuidToBytes(conversationId)),
+        ]);
+        if (getMessageStoreOwner() !== owner) return false;
+        signedOutMembers = signedOutMemberKeys(
+          memberKeys.map(bytesToBase64),
+          devices.map((device) => device.credentialPublicKey),
+        ).length;
+      }
+
+      if (!rebuildReason({ serverGeneration, localGeneration, unreadable: syncResult.unusable, signedOutMembers })) return false;
+      if (!mayRebuildNow(lastRebuildAtRef.current.get(conversationId), Date.now(), userInitiated)) return false;
+      lastRebuildAtRef.current.set(conversationId, Date.now());
+      let accepted = false;
+      try {
+        // Rebuilding replaces this device's copy of the group before the
+        // server confirms it, so decide on the server's current generation,
+        // not a cached one that another device may have moved past.
+        const listed = (await e2eeApi.listConversations()).find((row) => row.conversationId === conversationId);
+        if (getMessageStoreOwner() !== owner || !listed) return false;
+        serverGenerationRef.current.set(conversationId, listed.groupGeneration);
+        if (listed.groupGeneration !== serverGeneration) return true; // moved on: sync first, then decide again
+        accepted = await rebuildConversationGroup(owner, conversationId, serverGeneration);
+      } catch (err) {
+        if (userInitiated) throw err;
+        // Retried after the cooldown, on a later sync.
+      }
+      if (getMessageStoreOwner() !== owner) return false;
+      refreshConversationPreview(owner, conversationId);
+      notifyConversationChanged(conversationId);
+      applyConversations(listLocalConversations(owner));
+      return !accepted;
+    },
+    [deviceId, rebuildConversationGroup, applyConversations],
   );
 
   /**
@@ -453,24 +737,32 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
    * network, a long first sync); instead of overlapping requests and
    * decrypt attempts, the later request is folded into a single follow-up
    * sync once the running one finishes, and every caller's promise
-   * resolves after data at least as new as its request.
+   * resolves after data at least as new as its request. Group maintenance
+   * (joining, rebuilding) runs inside the same slot, so a rebuild never
+   * overlaps a sync or another rebuild of the same conversation.
    */
-  const syncStateRef = useRef(new Map<string, { running: Promise<void>; again: boolean }>());
+  const syncStateRef = useRef(new Map<string, { running: Promise<void>; again: boolean; userInitiated: boolean }>());
 
-  const pollConversation = useCallback(
-    (conversationId: string): Promise<void> => {
+  const runConversationSync = useCallback(
+    (conversationId: string, userInitiated: boolean): Promise<void> => {
       const states = syncStateRef.current;
       const inFlight = states.get(conversationId);
       if (inFlight) {
         inFlight.again = true;
+        inFlight.userInitiated ||= userInitiated;
         return inFlight.running;
       }
-      const state = { running: Promise.resolve(), again: false };
+      const state = { running: Promise.resolve(), again: false, userInitiated };
       state.running = (async () => {
         try {
           do {
             state.again = false;
-            await syncConversation(conversationId);
+            const initiated = state.userInitiated;
+            state.userInitiated = false;
+            const result = await syncConversation(conversationId);
+            if (!result) continue;
+            // A lost rebuild race means another device's Welcome is waiting.
+            if (await maintainGroup(conversationId, result, initiated)) state.again = true;
           } while (state.again);
         } finally {
           states.delete(conversationId);
@@ -479,7 +771,12 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       states.set(conversationId, state);
       return state.running;
     },
-    [syncConversation],
+    [syncConversation, maintainGroup],
+  );
+
+  const pollConversation = useCallback(
+    (conversationId: string): Promise<void> => runConversationSync(conversationId, false).catch(() => {}),
+    [runConversationSync],
   );
 
   const refreshConversations = useCallback(async (): Promise<void> => {
@@ -502,6 +799,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     // and owner-stamped exactly as before.)
     const local = new Map(listLocalConversations(owner).map((conversation) => [conversation.id, conversation]));
     for (const row of remote) {
+      serverGenerationRef.current.set(row.conversationId, row.groupGeneration);
       const existing = local.get(row.conversationId);
       if (existing && existing.otherUsername === row.otherUser.username && existing.otherDisplayName === row.otherUser.displayName) {
         continue;
@@ -515,13 +813,16 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       });
     }
 
-    // Catches a Welcome for a conversation someone just started with us,
-    // even before we've opened it — keeps the chat list showing
-    // conversations as usable (joined) without requiring the user to
-    // tap in first.
+    // Syncs every conversation this device isn't on the current group of —
+    // one someone just started with us, one whose group was rebuilt (a new
+    // Welcome is waiting), one this device must rebuild — plus any due a
+    // membership check, even before the user opens it.
+    const now = Date.now();
     for (const row of remote) {
       if (getMessageStoreOwner() !== owner) return;
-      if (!isConversationJoined(owner, row.conversationId)) {
+      const behind = row.groupGeneration === 0 || getLocalGroupGeneration(owner, row.conversationId) !== row.groupGeneration;
+      const membershipDue = now - (membershipCheckedAtRef.current.get(row.conversationId) ?? 0) >= MEMBERSHIP_CHECK_MS;
+      if (behind || membershipDue) {
         await pollConversation(row.conversationId);
         if (getMessageStoreOwner() !== owner) return;
       }
@@ -545,8 +846,31 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       setE2eeError(null);
       return;
     }
+    // What this device already has, right away — before (and without)
+    // reaching the server, so an app started offline still shows its chats.
+    const owner = getMessageStoreOwner();
+    if (owner) applyConversations(listLocalConversations(owner));
     ensureE2eeSetup();
-  }, [status, ensureE2eeSetup]);
+  }, [status, ensureE2eeSetup, applyConversations]);
+
+  // Setup needs the server; one that failed (e.g. the app was started
+  // offline) is retried when the connection or the app comes back instead
+  // of waiting for the user to find the retry button.
+  useEffect(() => {
+    if (status !== 'authenticated' || e2eeReady || !e2eeError) return;
+    const offStatus = realtime.onStatus((next) => {
+      if (next === 'online') void ensureE2eeSetup();
+    });
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') void ensureE2eeSetup();
+    });
+    const timer = setInterval(() => void ensureE2eeSetup(), 30 * 1000);
+    return () => {
+      offStatus();
+      subscription.remove();
+      clearInterval(timer);
+    };
+  }, [status, e2eeReady, e2eeError, ensureE2eeSetup]);
 
   useEffect(() => {
     if (status !== 'authenticated' || !e2eeReady) return;
@@ -582,6 +906,9 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     const subscription = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
         refreshConversations();
+        // Other people starting chats with this device while it was away
+        // use up its KeyPackages too.
+        topUpKeyPackages().catch(() => {});
         startInterval();
       } else {
         stopInterval();
@@ -605,7 +932,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     const offEvent = realtime.onEvent((event) => {
       if (event.type !== 'conversation.updated') return;
       const owner = getMessageStoreOwner();
-      if (owner && isConversationJoined(owner, event.conversationId)) {
+      if (owner && getConversation(owner, event.conversationId)) {
         void pollConversation(event.conversationId).then(() => {
           if (getMessageStoreOwner() === owner) applyConversations(listLocalConversations(owner));
         });
@@ -636,6 +963,50 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
    */
   const startConversationInFlightRef = useRef<Map<string, Promise<string>>>(new Map());
 
+  /**
+   * Makes sure this device can use the conversation: syncs it (joining a
+   * Welcome waiting for it), then — if the conversation has no group yet,
+   * or this device isn't in its current one — builds it. Two people (or
+   * two devices) doing this at once is safe: the server keeps exactly one
+   * build and everyone else joins it (see groupSync.ts). Replaces the old
+   * create-then-add-each-device flow, which could leave the two sides in
+   * different groups.
+   */
+  const startConversationImpl = useCallback(
+    async (otherUserId: string, otherUsername: string, otherDisplayName: string): Promise<string> => {
+      const owner = getMessageStoreOwner();
+      if (!owner) throw new Error('You are not signed in.');
+
+      const { conversationId, groupGeneration } = await e2eeApi.createConversation({ otherUserId });
+      if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+      upsertConversation(owner, {
+        id: conversationId,
+        otherUserId,
+        otherUsername,
+        otherDisplayName,
+        createdAt: nowIso(),
+      });
+      serverGenerationRef.current.set(conversationId, groupGeneration);
+
+      if (groupGeneration === 0 || getLocalGroupGeneration(owner, conversationId) !== groupGeneration) {
+        try {
+          await runConversationSync(conversationId, true);
+        } catch (err) {
+          if (err instanceof PeerNotReadyError) throw err;
+          throw new Error(getApiErrorMessage(err, `Couldn't set up encryption with ${otherDisplayName}. Try again shortly.`));
+        }
+      }
+      if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+      if (getLocalGroupGeneration(owner, conversationId) === 0) {
+        throw new Error(`${otherDisplayName}'s device isn't ready to receive encrypted messages yet. Try again shortly.`);
+      }
+
+      applyConversations(listLocalConversations(owner));
+      return conversationId;
+    },
+    [runConversationSync, applyConversations],
+  );
+
   const startConversation = useCallback(
     async (otherUserId: string, otherUsername: string, otherDisplayName: string): Promise<string> => {
       const inFlight = startConversationInFlightRef.current.get(otherUserId);
@@ -653,122 +1024,68 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       startConversationInFlightRef.current.set(otherUserId, promise);
       return promise;
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [startConversationImpl],
   );
 
   /**
-   * Captures `owner` once at entry and re-checks it after every `await`
-   * (via `requireStillOwner`) before writing to messageStore or
-   * publishing trust material under that account — see `syncConversation`
-   * for the same pattern and rationale. A stale check throws, aborting
-   * the rest of this call; the caller (`startConversation`'s wrapper)
-   * already removes this from the in-flight map in its own `finally`.
+   * Encrypts with the conversation's current group and sends, tagged with
+   * that group's generation. If the conversation moved to a newer group in
+   * the meantime (another device rebuilt it) the server refuses the send
+   * rather than storing a message nobody else can read; this device then
+   * syncs (joining the new group) and sends once more, re-encrypted.
    */
-  const startConversationImpl = useCallback(
-    async (otherUserId: string, otherUsername: string, otherDisplayName: string): Promise<string> => {
-      const owner = getMessageStoreOwner();
-      if (!owner) throw new Error('You are not signed in.');
-      const requireStillOwner = () => {
-        if (getMessageStoreOwner() !== owner) {
-          throw new Error('Signed out before this could finish.');
-        }
+  const encryptAndSend = useCallback(
+    async (owner: string, conversationId: string, send: (generation: number) => Promise<{ messageId: string; createdAt?: string }>) => {
+      const attempt = () => {
+        const generation = getLocalGroupGeneration(owner, conversationId);
+        if (generation === 0) throw new Error('This conversation is not ready to send messages yet.');
+        return send(generation);
       };
-
-      const { conversationId } = await e2eeApi.createConversation({ otherUserId });
-      requireStillOwner();
-      upsertConversation(owner, {
-        id: conversationId,
-        otherUserId,
-        otherUsername,
-        otherDisplayName,
-        createdAt: nowIso(),
-      });
-
-      if (!isConversationJoined(owner, conversationId)) {
-        const groupIdBytes = uuidToBytes(conversationId);
-        // A previous attempt at this same conversation can have created
-        // the local MLS group and then failed at a later step (recipient
-        // had no active device yet, network drop, etc.) — OpenMLS's group
-        // storage is keyed by group id and rejects re-creating one that
-        // already exists locally, so a naive retry would call createGroup
-        // again here and fail permanently. Guard it with the same
-        // local-flag idempotency pattern used for KeyPackage publishing.
-        //
-        // Scoped by `owner`, unlike app_state's other flags (e.g.
-        // welcome_processed:<messageId>), which are deliberately global —
-        // see messageStore.ts's module doc. Those are safe unscoped
-        // because they represent server-side state that's the same
-        // regardless of which local account checks it. This flag is
-        // different: it gates a per-account native operation (OpenMLS
-        // group storage is namespaced per user — see mls-core's
-        // getOrCreateMasterKey/storage-open, keyed by userId). Without
-        // the owner in the key, one account's successful createGroup()
-        // would set a flag that a DIFFERENT account (logged into on the
-        // same device, e.g. during multi-account testing) would then
-        // read as "already created" and skip its own createGroup() —
-        // leaving that account's local MLS store without the group at
-        // all, so the later addMemberToGroup() call fails with
-        // GroupNotFound. Reproduced exactly this way: switching between
-        // two accounts on one device while both had pending invites to
-        // the same conversation id.
-        const groupCreatedFlagKey = `groupCreated:${owner}:${conversationId}`;
-        if (getAppState(groupCreatedFlagKey) !== 'true') {
-          await createGroup(groupIdBytes);
-          requireStillOwner();
-          setAppState(groupCreatedFlagKey, 'true');
-        }
-
-        const deviceIds = await e2eeApi.listActiveDeviceIds({ userId: otherUserId });
-        requireStillOwner();
-        if (deviceIds.length === 0) {
-          throw new Error(`${otherDisplayName} hasn't set up encrypted messaging on any device yet.`);
-        }
-
-        let invitedAny = false;
-        for (const targetDeviceId of deviceIds) {
-          const { keyPackage } = await e2eeApi.consumeKeyPackage({ targetDeviceId });
-          requireStillOwner();
-          if (!keyPackage) continue; // no KeyPackage available for this device right now — best-effort, skip it
-          const welcomeBytes = await addMemberToGroup(groupIdBytes, base64ToBytes(keyPackage));
-          requireStillOwner();
-          await e2eeApi.sendMessage({
-            conversationId,
-            ciphertext: bytesToBase64(welcomeBytes),
-            messageType: 'welcome',
-            recipientDeviceId: targetDeviceId,
-          });
-          invitedAny = true;
-        }
-
-        if (!invitedAny) {
-          throw new Error(`${otherDisplayName}'s device isn't ready to receive encrypted messages yet. Try again shortly.`);
-        }
-
-        requireStillOwner();
-        markConversationJoined(owner, conversationId);
+      try {
+        return await attempt();
+      } catch (err) {
+        if (!isStaleGenerationError(err)) throw err;
+        await pollConversation(conversationId);
+        if (getMessageStoreOwner() !== owner) throw err;
+        return attempt();
       }
-
-      requireStillOwner();
-      applyConversations(listLocalConversations(owner));
-      return conversationId;
     },
-    // applyConversations is stable (no dependencies).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [pollConversation],
   );
 
-  const attemptSend = useCallback(
+  /**
+   * Sends in one conversation go out one at a time, in the order the user
+   * made them. They used to run concurrently, so when one request was slow
+   * (a lost response the network layer resends, see the server's duplicate
+   * handling in e2ee.sendMessage) a later message reached the server — and
+   * so the chat — before an earlier one.
+   */
+  const sendQueueRef = useRef(new Map<string, Promise<void>>());
+  const inSendOrder = useCallback((conversationId: string, send: () => Promise<void>): Promise<void> => {
+    const queue = sendQueueRef.current;
+    const previous = queue.get(conversationId) ?? Promise.resolve();
+    const next = previous.then(send, send);
+    queue.set(conversationId, next);
+    void next.finally(() => {
+      if (queue.get(conversationId) === next) queue.delete(conversationId);
+    });
+    return next;
+  }, []);
+
+  const attemptSendNow = useCallback(
     async (conversationId: string, localId: string, text: string): Promise<void> => {
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return;
       try {
         const groupIdBytes = uuidToBytes(conversationId);
-        const ciphertext = await encryptMessage(groupIdBytes, text);
-        const { messageId, createdAt } = await e2eeApi.sendMessage({
-          conversationId,
-          ciphertext: bytesToBase64(ciphertext),
-          messageType: 'application',
+        const { messageId, createdAt } = await encryptAndSend(owner, conversationId, async (generation) => {
+          const ciphertext = await encryptMessage(owner, groupIdBytes, text);
+          return e2eeApi.sendMessage({
+            conversationId,
+            ciphertext: bytesToBase64(ciphertext),
+            messageType: 'application',
+            mlsGeneration: generation,
+          });
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
         // The server's own timestamp when it returns one (older servers
@@ -782,24 +1099,34 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       refreshConversationPreview(owner, conversationId);
       notifyConversationChanged(conversationId);
     },
-    [deviceId],
+    [deviceId, encryptAndSend],
+  );
+
+  const attemptSend = useCallback(
+    (conversationId: string, localId: string, text: string): Promise<void> =>
+      inSendOrder(conversationId, () => attemptSendNow(conversationId, localId, text)),
+    [inSendOrder, attemptSendNow],
   );
 
   /**
    * Mirrors `attemptSend` exactly (same owner-capture-and-recheck-after-
    * every-await pattern), but for a voice message's two-part send: the
    * audio blob is encrypted with the SAME `encryptMessage` call used for
-   * ordinary text (no native/crypto changes — see the design note in the
-   * project plan) and uploaded as opaque bytes to the REST media
-   * endpoint; a small JSON envelope (mediaId + duration) is then sent
-   * through the existing `sendMessage` path, exactly like a text
-   * message. The local optimistic row already has `audioLocalUri`
-   * pointing at the just-recorded file (see `sendVoiceMessage`), so the
-   * sender's own bubble is playable immediately — this function's only
-   * job is to get the blob+metadata to the server and reconcile the
-   * local id, never to make audio playable locally (it already is).
+   * ordinary text and uploaded as opaque bytes to the REST media endpoint;
+   * a small JSON envelope (mediaId + duration) is then sent through the
+   * existing `sendMessage` path, exactly like a text message. The local
+   * optimistic row already has `audioLocalUri` pointing at the
+   * just-recorded file (see `sendVoiceMessage`), so the sender's own
+   * bubble is playable immediately — this function's only job is to get
+   * the blob+metadata to the server and reconcile the local id.
+   *
+   * The blob and its envelope must be encrypted in the same group: an
+   * upload from an earlier attempt is only reused if the conversation is
+   * still on the generation it was encrypted for (`voiceBlobGeneration`);
+   * otherwise nobody in the current group could decrypt it, so it is
+   * encrypted and uploaded again.
    */
-  const attemptSendVoice = useCallback(
+  const attemptSendVoiceNow = useCallback(
     async (conversationId: string, localId: string, localFileUri: string, durationMs: number): Promise<void> => {
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return;
@@ -807,34 +1134,36 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         const bytes = await readAudioBytes(localFileUri);
         if (getMessageStoreOwner() !== owner) return;
         const groupIdBytes = uuidToBytes(conversationId);
+        const blobGenerationKey = `voiceBlobGeneration:${owner}:${localId}`;
 
-        // Audit fix: reuse a mediaId from a prior attempt instead of
-        // re-uploading. If a previous call reached uploadVoiceBlob
-        // successfully but then failed before/at sendMessage (network
-        // drop, app killed), `mediaId` below is already persisted on
-        // this row — without this check, every retry re-encrypted and
-        // re-uploaded the same audio under a brand-new mediaId, leaving
-        // each earlier upload permanently orphaned on the server (no
-        // message ever ends up referencing it, and there is no
-        // garbage-collection job for unreferenced blobs).
-        const existingRow = getMessageById(owner, localId);
-        let mediaId = existingRow?.audioMediaId ?? null;
-        if (!mediaId) {
-          const blobCiphertext = await encryptMessage(groupIdBytes, bytesToBase64(bytes));
-          if (getMessageStoreOwner() !== owner) return;
-          const uploaded = await uploadVoiceBlob(conversationId, blobCiphertext);
-          if (getMessageStoreOwner() !== owner) return;
-          mediaId = uploaded.mediaId;
-          setVoiceMediaId(owner, localId, mediaId);
-        }
+        const { messageId, createdAt } = await encryptAndSend(owner, conversationId, async (generation) => {
+          // Audit fix: reuse a mediaId from a prior attempt instead of
+          // re-uploading, so a retry after a failure between upload and
+          // send doesn't leave the earlier upload orphaned on the server.
+          let mediaId = getMessageById(owner, localId)?.audioMediaId ?? null;
+          if (mediaId && getAppState(blobGenerationKey) !== String(generation)) {
+            mediaId = null;
+            setVoiceMediaId(owner, localId, null);
+          }
+          if (!mediaId) {
+            const blobCiphertext = await encryptMessage(owner, groupIdBytes, bytesToBase64(bytes));
+            if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+            const uploaded = await uploadVoiceBlob(conversationId, blobCiphertext);
+            if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+            mediaId = uploaded.mediaId;
+            setVoiceMediaId(owner, localId, mediaId);
+            setAppState(blobGenerationKey, String(generation));
+          }
 
-        const envelope = buildVoiceEnvelope({ mediaId, durationMs, byteSize: bytes.length, mimeType: 'audio/m4a' });
-        const metadataCiphertext = await encryptMessage(groupIdBytes, envelope);
-        if (getMessageStoreOwner() !== owner) return;
-        const { messageId, createdAt } = await e2eeApi.sendMessage({
-          conversationId,
-          ciphertext: bytesToBase64(metadataCiphertext),
-          messageType: 'application',
+          const envelope = buildVoiceEnvelope({ mediaId, durationMs, byteSize: bytes.length, mimeType: 'audio/m4a' });
+          const metadataCiphertext = await encryptMessage(owner, groupIdBytes, envelope);
+          if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+          return e2eeApi.sendMessage({
+            conversationId,
+            ciphertext: bytesToBase64(metadataCiphertext),
+            messageType: 'application',
+            mlsGeneration: generation,
+          });
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
         reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
@@ -846,16 +1175,32 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       refreshConversationPreview(owner, conversationId);
       notifyConversationChanged(conversationId);
     },
-    [deviceId],
+    [deviceId, encryptAndSend],
+  );
+
+  const attemptSendVoice = useCallback(
+    (conversationId: string, localId: string, localFileUri: string, durationMs: number): Promise<void> =>
+      inSendOrder(conversationId, () => attemptSendVoiceNow(conversationId, localId, localFileUri, durationMs)),
+    [inSendOrder, attemptSendVoiceNow],
+  );
+
+  /** Resolves once this device is on the conversation's group, trying to (re)build it if needed; throws if it can't be used yet. */
+  const requireUsableGroup = useCallback(
+    async (owner: string, conversationId: string): Promise<void> => {
+      if (getLocalGroupGeneration(owner, conversationId) > 0) return;
+      await runConversationSync(conversationId, true);
+      if (getMessageStoreOwner() !== owner || getLocalGroupGeneration(owner, conversationId) === 0) {
+        throw new Error('This conversation is not ready to send messages yet.');
+      }
+    },
+    [runConversationSync],
   );
 
   const sendChatMessage = useCallback(
     async (conversationId: string, text: string): Promise<void> => {
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return;
-      if (!isConversationJoined(owner, conversationId)) {
-        throw new Error('This conversation is not ready to send messages yet.');
-      }
+      await requireUsableGroup(owner, conversationId);
       const localId = randomLocalId();
       const timestamp = nowIso();
       recordMessage(owner, {
@@ -872,7 +1217,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       notifyConversationChanged(conversationId);
       await attemptSend(conversationId, localId, text);
     },
-    [deviceId, attemptSend],
+    [deviceId, attemptSend, requireUsableGroup],
   );
 
   /**
@@ -890,9 +1235,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     async (conversationId: string, recordedUri: string, durationMs: number): Promise<void> => {
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return;
-      if (!isConversationJoined(owner, conversationId)) {
-        throw new Error('This conversation is not ready to send messages yet.');
-      }
+      await requireUsableGroup(owner, conversationId);
       const localId = randomLocalId();
       const persistedUri = await persistRecording(owner, conversationId, localId, recordedUri);
       if (getMessageStoreOwner() !== owner) return;
@@ -916,45 +1259,18 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       notifyConversationChanged(conversationId);
       await attemptSendVoice(conversationId, localId, persistedUri, durationMs);
     },
-    [deviceId, attemptSendVoice],
+    [deviceId, attemptSendVoice, requireUsableGroup],
   );
 
-  /**
-   * Lazily fetches+decrypts a received voice message's audio blob on
-   * first playback (never eagerly on receipt — see `syncConversation`'s
-   * `audioState: 'idle'`), then caches the decrypted bytes to a local
-   * file so replaying the same message never re-downloads/re-decrypts.
-   * A concurrent second call for the same message (e.g. a double tap)
-   * bails immediately once it sees `audioState` is already
-   * 'downloading'/'downloaded' — decrypting the same MLS ciphertext
-   * twice is not safe (see mlsCore.ts), so this must never be attempted.
-   */
-  const downloadVoiceMessage = useCallback(async (conversationId: string, messageId: string): Promise<void> => {
-    const owner = getMessageStoreOwner();
-    if (!owner) return;
-    const row = getMessageById(owner, messageId);
-    if (!row || row.kind !== 'voice' || !row.audioMediaId) return;
-    if (row.audioState === 'downloading' || row.audioState === 'downloaded') return;
-
-    updateVoiceAudio(owner, messageId, { audioState: 'downloading' });
-    notifyConversationChanged(conversationId);
-
-    try {
-      const blobCiphertext = await downloadVoiceBlob(conversationId, row.audioMediaId);
-      if (getMessageStoreOwner() !== owner) return;
-      const groupIdBytes = uuidToBytes(conversationId);
-      const base64Audio = await decryptMessage(groupIdBytes, blobCiphertext);
-      if (getMessageStoreOwner() !== owner) return;
-      const uri = writeDownloadedAudio(owner, conversationId, row.audioMediaId, base64ToBytes(base64Audio));
-      if (getMessageStoreOwner() !== owner) return;
-      updateVoiceAudio(owner, messageId, { audioLocalUri: uri, audioState: 'downloaded' });
-    } catch {
-      if (getMessageStoreOwner() !== owner) return;
-      updateVoiceAudio(owner, messageId, { audioState: 'failed' });
-    }
-    if (getMessageStoreOwner() !== owner) return;
-    notifyConversationChanged(conversationId);
-  }, []);
+  /** Fetches a received voice message's audio if the sync couldn't (see fetchVoiceAudio). */
+  const downloadVoiceMessage = useCallback(
+    async (conversationId: string, messageId: string): Promise<void> => {
+      const owner = getMessageStoreOwner();
+      if (!owner) return;
+      await fetchVoiceAudio(owner, conversationId, messageId);
+    },
+    [fetchVoiceAudio],
+  );
 
   const retryMessage = useCallback(
     async (conversationId: string, messageId: string): Promise<void> => {

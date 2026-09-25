@@ -20,7 +20,14 @@ const sessionColumns = {
 
 /** Exactly what signing out has always cleared: the refresh token (so it can't be exchanged again) and the push token. */
 function terminatedFields() {
-  return { revokedAt: new Date(), refreshTokenHash: null, refreshTokenExpiresAt: null, pushToken: null };
+  return {
+    revokedAt: new Date(),
+    refreshTokenHash: null,
+    refreshTokenExpiresAt: null,
+    previousRefreshTokenHash: null,
+    previousRefreshTokenValidUntil: null,
+    pushToken: null,
+  };
 }
 
 function targetCondition(target: RevokeTarget): SQL | undefined {

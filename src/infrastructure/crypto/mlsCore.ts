@@ -10,7 +10,7 @@
 // decrypted for its own use. Private key material never crosses this
 // boundary into JavaScript — see modules/mls-core/rust's module docs.
 import MlsCoreModuleNative from '../../../modules/mls-core/src/MlsCoreModule';
-import type { DeviceCredentialInfo, IdentityKeyInfo } from '../../../modules/mls-core/src/MlsCore.types';
+import type { DeviceCredentialInfo, IdentityKeyInfo, RebuiltGroupInfo } from '../../../modules/mls-core/src/MlsCore.types';
 
 // Tracks *which account's* stores are open, not just whether initialize()
 // has ever run — a signed-in session can switch accounts (sign out, sign
@@ -45,21 +45,52 @@ export async function generateKeyPackages(count: number): Promise<Uint8Array[]> 
   return MlsCoreModuleNative.generateKeyPackages(count);
 }
 
-export async function createGroup(groupId: Uint8Array): Promise<void> {
-  await MlsCoreModuleNative.createGroup(groupId);
+/**
+ * Group operations run against whichever account's stores are open, and a
+ * sync or send that began before a sign-out/sign-in could otherwise reach
+ * the native module after the switch and use (and advance) the other
+ * account's group state. Checked synchronously right before each call is
+ * dispatched; the native module runs calls in dispatch order, so a call
+ * dispatched while `owner`'s stores are open runs against them.
+ * "StorageNotInitialized" makes groupSync.classifyMlsError treat it as
+ * retryable.
+ */
+function assertOpenFor(owner: string): void {
+  if (initializedForUserId !== owner) {
+    throw new Error('StorageNotInitialized: E2EE storage is not open for this account');
+  }
 }
 
-/** Returns the Welcome message bytes to deliver to the newly-added device. */
-export async function addMemberToGroup(groupId: Uint8Array, keyPackageBytes: Uint8Array): Promise<Uint8Array> {
-  return MlsCoreModuleNative.addMemberToGroup(groupId, keyPackageBytes);
+/**
+ * (Re)creates the conversation's group with every device behind
+ * `keyPackages` added in one commit. `included` lists which KeyPackages (by
+ * index) were used; only those devices may be sent `welcome`. See
+ * groupSync.ts for why a group is only ever built this way.
+ */
+export async function rebuildGroup(owner: string, groupId: Uint8Array, keyPackages: Uint8Array[]): Promise<RebuiltGroupInfo> {
+  assertOpenFor(owner);
+  return MlsCoreModuleNative.rebuildGroup(groupId, keyPackages);
 }
 
-/** Returns the joined group's id (equal to `groupId` on success). */
-export async function joinGroupFromWelcome(welcomeBytes: Uint8Array): Promise<Uint8Array> {
-  return MlsCoreModuleNative.joinGroupFromWelcome(welcomeBytes);
+/** Joins from a Welcome, replacing any stale local copy of that group once the Welcome is verified to be for this device. */
+export async function joinGroupReplacing(owner: string, welcomeBytes: Uint8Array): Promise<Uint8Array> {
+  assertOpenFor(owner);
+  return MlsCoreModuleNative.joinGroupReplacing(welcomeBytes);
 }
 
-export async function encryptMessage(groupId: Uint8Array, plaintext: string): Promise<Uint8Array> {
+export async function deleteGroup(owner: string, groupId: Uint8Array): Promise<void> {
+  assertOpenFor(owner);
+  await MlsCoreModuleNative.deleteGroup(groupId);
+}
+
+/** Public signature keys of the group's members; empty if this device has no copy of it. */
+export async function groupMemberSignatureKeys(owner: string, groupId: Uint8Array): Promise<Uint8Array[]> {
+  assertOpenFor(owner);
+  return MlsCoreModuleNative.groupMemberSignatureKeys(groupId);
+}
+
+export async function encryptMessage(owner: string, groupId: Uint8Array, plaintext: string): Promise<Uint8Array> {
+  assertOpenFor(owner);
   return MlsCoreModuleNative.encryptMessage(groupId, plaintext);
 }
 
@@ -70,7 +101,8 @@ export async function encryptMessage(groupId: Uint8Array, plaintext: string): Pr
  * guessed content. See the Phase 5D-FIX report for why this specific
  * failure mode is a hard error, not a soft one, by design.
  */
-export async function decryptMessage(groupId: Uint8Array, ciphertext: Uint8Array): Promise<string> {
+export async function decryptMessage(owner: string, groupId: Uint8Array, ciphertext: Uint8Array): Promise<string> {
+  assertOpenFor(owner);
   return MlsCoreModuleNative.decryptMessage(groupId, ciphertext);
 }
 

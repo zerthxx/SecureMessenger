@@ -50,6 +50,13 @@
       "when": 1789381720992,
       "tag": "0006_device_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790361836261,
+      "tag": "0007_mls_generations",
+      "breakpoints": true
     }
   ]
 }

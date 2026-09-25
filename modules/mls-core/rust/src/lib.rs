@@ -22,6 +22,8 @@ mod call_signal;
 mod error;
 mod group;
 mod group_storage;
+#[cfg(test)]
+mod regression_tests;
 mod storage;
 
 use std::sync::Mutex;
@@ -328,6 +330,50 @@ pub fn add_member_to_group(group_id: Vec<u8>, key_package_bytes: Vec<u8>) -> Res
 #[uniffi::export]
 pub fn join_group_from_welcome(welcome_bytes: Vec<u8>) -> Result<Vec<u8>, MlsCoreError> {
     with_group_store(|_store, group_provider| group::join_group_from_welcome(group_provider, &welcome_bytes))
+}
+
+#[derive(uniffi::Record)]
+pub struct RebuiltGroupInfo {
+    /// One Welcome every included device joins from.
+    pub welcome: Vec<u8>,
+    /// Indices into the `key_packages` argument that were added; the rest
+    /// were unusable or duplicates and must not be sent this Welcome.
+    pub included: Vec<u32>,
+}
+
+/// (Re)creates this device's copy of `group_id` with every device behind
+/// `key_packages` added in one commit — see group.rs's `rebuild_group`.
+/// Replaces `create_group` + repeated `add_member_to_group` for starting a
+/// conversation, and is also how a device that finds its copy of a group
+/// unusable (stale, forked, never joined) brings every device back onto
+/// one shared group.
+#[uniffi::export]
+pub fn rebuild_group(group_id: Vec<u8>, key_packages: Vec<Vec<u8>>) -> Result<RebuiltGroupInfo, MlsCoreError> {
+    with_group_store(|store, group_provider| {
+        let device_key = store.device_credential_key().ok_or(MlsCoreError::NoDeviceCredential)?;
+        let rebuilt = group::rebuild_group(group_provider, &device_key, &group_id, &key_packages)?;
+        Ok(RebuiltGroupInfo { welcome: rebuilt.welcome, included: rebuilt.included })
+    })
+}
+
+/// Joins from a Welcome, replacing this device's existing copy of the group
+/// only after the Welcome is verified to be for this device — see
+/// group.rs's `join_group_replacing`. Returns the group id.
+#[uniffi::export]
+pub fn join_group_replacing(welcome_bytes: Vec<u8>) -> Result<Vec<u8>, MlsCoreError> {
+    with_group_store(|_store, group_provider| group::join_group_replacing(group_provider, &welcome_bytes))
+}
+
+/// Removes this device's copy of a group, if any. Idempotent.
+#[uniffi::export]
+pub fn delete_group(group_id: Vec<u8>) -> Result<(), MlsCoreError> {
+    with_group_store(|_store, group_provider| group::delete_group(group_provider, &group_id))
+}
+
+/// Signature public keys of every current member (public data only).
+#[uniffi::export]
+pub fn group_member_signature_keys(group_id: Vec<u8>) -> Result<Vec<Vec<u8>>, MlsCoreError> {
+    with_group_provider_read_only(|group_provider| group::member_signature_keys(group_provider, &group_id))
 }
 
 /// Encrypts a plaintext application message for the given group. Returns

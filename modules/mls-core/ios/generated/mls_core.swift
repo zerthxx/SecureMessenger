@@ -481,6 +481,46 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -613,6 +653,83 @@ public func FfiConverterTypeDeviceCredentialInfo_lower(_ value: DeviceCredential
 }
 
 
+/**
+ * TEMPORARY diagnostic export — added to prove or disprove whether
+ * [`initialize`] and every other function routed through [`with_store`]
+ * (in practice, [`generate_identity_key`]) are observing the *same*
+ * in-memory `STORES` static within one process. Reports only the
+ * static's own address and its current Some/None state — never
+ * anything from inside `OpenStores` (no key material, no paths, no
+ * account data). If two calls in the same process/thread/Kotlin
+ * instance report *different* `stores_address` values, that is direct
+ * proof the two calls are not sharing one loaded copy of this library's
+ * global state — see the Honor-device `StorageNotInitialized`
+ * investigation. Remove once the root cause is confirmed.
+ */
+public struct DiagStoresState: Equatable, Hashable {
+    /**
+     * Address of the `STORES` static itself, as observed by *this*
+     * call — not a pointer to any secret, just this process's view of
+     * where its own global variable lives.
+     */
+    public var storesAddress: UInt64
+    public var isSome: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Address of the `STORES` static itself, as observed by *this*
+         * call — not a pointer to any secret, just this process's view of
+         * where its own global variable lives.
+         */storesAddress: UInt64, isSome: Bool) {
+        self.storesAddress = storesAddress
+        self.isSome = isSome
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DiagStoresState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDiagStoresState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DiagStoresState {
+        return
+            try DiagStoresState(
+                storesAddress: FfiConverterUInt64.read(from: &buf), 
+                isSome: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DiagStoresState, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.storesAddress, into: &buf)
+        FfiConverterBool.write(value.isSome, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiagStoresState_lift(_ buf: RustBuffer) throws -> DiagStoresState {
+    return try FfiConverterTypeDiagStoresState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiagStoresState_lower(_ value: DiagStoresState) -> RustBuffer {
+    return FfiConverterTypeDiagStoresState.lower(value)
+}
+
+
 public struct IdentityKeyInfo: Equatable, Hashable {
     /**
      * Ed25519 public key, raw bytes. Safe to publish to the server and
@@ -671,6 +788,74 @@ public func FfiConverterTypeIdentityKeyInfo_lower(_ value: IdentityKeyInfo) -> R
 }
 
 
+public struct RebuiltGroupInfo: Equatable, Hashable {
+    /**
+     * One Welcome every included device joins from.
+     */
+    public var welcome: Data
+    /**
+     * Indices into the `key_packages` argument that were added; the rest
+     * were unusable or duplicates and must not be sent this Welcome.
+     */
+    public var included: [UInt32]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * One Welcome every included device joins from.
+         */welcome: Data, 
+        /**
+         * Indices into the `key_packages` argument that were added; the rest
+         * were unusable or duplicates and must not be sent this Welcome.
+         */included: [UInt32]) {
+        self.welcome = welcome
+        self.included = included
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RebuiltGroupInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRebuiltGroupInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RebuiltGroupInfo {
+        return
+            try RebuiltGroupInfo(
+                welcome: FfiConverterData.read(from: &buf), 
+                included: FfiConverterSequenceUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RebuiltGroupInfo, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.welcome, into: &buf)
+        FfiConverterSequenceUInt32.write(value.included, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRebuiltGroupInfo_lift(_ buf: RustBuffer) throws -> RebuiltGroupInfo {
+    return try FfiConverterTypeRebuiltGroupInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRebuiltGroupInfo_lower(_ value: RebuiltGroupInfo) -> RustBuffer {
+    return FfiConverterTypeRebuiltGroupInfo.lower(value)
+}
+
+
 /**
  * Errors surfaced across the UniFFI boundary to Kotlin/Swift.
  *
@@ -689,6 +874,39 @@ enum MlsCoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case NoIdentityKey
     case NoDeviceCredential
     case InvalidInput
+    case GroupNotFound
+    case GroupOperationFailed
+    /**
+     * Deliberately distinct from `GroupOperationFailed`: this is the
+     * error path for tampered/invalid/unauthenticated ciphertext (MLS's
+     * own AEAD/membership authentication rejecting it), not a generic
+     * failure — see the Phase 5C report's tamper-rejection verification.
+     */
+    case InvalidCiphertext
+    /**
+     * The message was encrypted in an epoch newer than this device's copy
+     * of the group: this device missed a membership change and its group
+     * state is stale. Retrying cannot help; only rejoining can.
+     */
+    case MessageFromFutureEpoch
+    /**
+     * The message was encrypted in an epoch older than this device's copy
+     * of the group — e.g. sent before this device joined. MLS gives a new
+     * member no keys for epochs before it joined, by design.
+     */
+    case MessageFromPastEpoch
+    /**
+     * MLS never lets a member decrypt its own messages (the key material
+     * is erased right after sending).
+     */
+    case OwnMessage
+    /**
+     * A second copy of a message this device already decrypted (its key is
+     * single-use and already gone). Happens when a send reaches the server
+     * twice — a network-level retry of the same request. Nothing to show:
+     * the first copy was delivered.
+     */
+    case DuplicateMessage
 
     
 
@@ -724,6 +942,13 @@ public struct FfiConverterTypeMlsCoreError: FfiConverterRustBuffer {
         case 4: return .NoIdentityKey
         case 5: return .NoDeviceCredential
         case 6: return .InvalidInput
+        case 7: return .GroupNotFound
+        case 8: return .GroupOperationFailed
+        case 9: return .InvalidCiphertext
+        case 10: return .MessageFromFutureEpoch
+        case 11: return .MessageFromPastEpoch
+        case 12: return .OwnMessage
+        case 13: return .DuplicateMessage
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -759,6 +984,34 @@ public struct FfiConverterTypeMlsCoreError: FfiConverterRustBuffer {
         case .InvalidInput:
             writeInt(&buf, Int32(6))
         
+        
+        case .GroupNotFound:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .GroupOperationFailed:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .InvalidCiphertext:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .MessageFromFutureEpoch:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .MessageFromPastEpoch:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .OwnMessage:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .DuplicateMessage:
+            writeInt(&buf, Int32(13))
+        
         }
     }
 }
@@ -776,6 +1029,31 @@ public func FfiConverterTypeMlsCoreError_lift(_ buf: RustBuffer) throws -> MlsCo
 #endif
 public func FfiConverterTypeMlsCoreError_lower(_ value: MlsCoreError) -> RustBuffer {
     return FfiConverterTypeMlsCoreError.lower(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
+    }
 }
 
 #if swift(>=5.8)
@@ -801,6 +1079,83 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
         }
         return seq
     }
+}
+/**
+ * Adds a peer device (identified by its public KeyPackage bytes,
+ * fetched from the server) to a group this device belongs to. Returns
+ * the TLS-serialized Welcome message — the only thing that needs to be
+ * delivered to that device (e.g. via the server, as opaque bytes) for
+ * it to join.
+ */
+public func addMemberToGroup(groupId: Data, keyPackageBytes: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_add_member_to_group(
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(keyPackageBytes),uniffiCallStatus
+    )
+})
+}
+/**
+ * Creates a brand-new persistent MLS group whose ID is `group_id` —
+ * the app is expected to pass its own (server-issued, already random)
+ * conversation ID here; see group.rs module docs for why that's safe.
+ * This device is the group's only member until [`add_member_to_group`]
+ * adds someone.
+ */
+public func createGroup(groupId: Data)throws   {try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_create_group(
+        FfiConverterData.lower(groupId),uniffiCallStatus
+    )
+}
+}
+/**
+ * Decrypts and authenticates a ciphertext for the given group. Returns
+ * `MlsCoreError::InvalidCiphertext` — never corrupted output — for
+ * tampered bytes or anything that fails MLS's own AEAD/membership
+ * authentication.
+ */
+public func decryptMessage(groupId: Data, ciphertext: Data)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_decrypt_message(
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(ciphertext),uniffiCallStatus
+    )
+})
+}
+/**
+ * Removes this device's copy of a group, if any. Idempotent.
+ */
+public func deleteGroup(groupId: Data)throws   {try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_delete_group(
+        FfiConverterData.lower(groupId),uniffiCallStatus
+    )
+}
+}
+public func diagStoresState() -> DiagStoresState  {
+    return try!  FfiConverterTypeDiagStoresState_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_diag_stores_state(uniffiCallStatus
+    )
+})
+}
+/**
+ * Encrypts a plaintext application message for the given group. Returns
+ * TLS-serialized ciphertext — this is the only representation of the
+ * message that is ever handed to the server (see the Phase 5C report
+ * for exactly what the server can and can't see).
+ */
+public func encryptMessage(groupId: Data, plaintext: String)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_encrypt_message(
+        FfiConverterData.lower(groupId),
+        FfiConverterString.lower(plaintext),uniffiCallStatus
+    )
+})
 }
 /**
  * Generates this device's MLS credential key if one doesn't already
@@ -854,23 +1209,130 @@ public func generateKeyPackages(count: UInt32)throws  -> [Data]  {
 })
 }
 /**
- * Opens (or creates) this device's encrypted local E2EE store.
- *
- * `master_key` must be exactly 32 bytes and must come from the
- * platform keystore (Android Keystore / iOS Keychain) — this function
- * never generates or persists it; it only holds it in memory for the
- * life of the process to encrypt/decrypt `storage_path`. See
- * storage.rs module docs for exactly what that file contains.
- *
- * Must be called once before any other function in this module.
+ * Signature public keys of every current member (public data only).
  */
-public func initialize(storagePath: String, masterKey: Data)throws   {try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+public func groupMemberSignatureKeys(groupId: Data)throws  -> [Data]  {
+    return try  FfiConverterSequenceData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_group_member_signature_keys(
+        FfiConverterData.lower(groupId),uniffiCallStatus
+    )
+})
+}
+/**
+ * Opens (or creates) the local E2EE stores for one account.
+ *
+ * `namespace`: identifies *which account* these stores belong to —
+ * callers pass the authenticated account's own stable id (never a
+ * device id, which is minted fresh on every login and would wrongly
+ * discard group state on a plain sign-out/sign-in; see the Phase 6
+ * account-isolation fix report). `storage_path`/`group_storage_path`
+ * must already be unique per namespace — this function doesn't derive
+ * or validate that itself, it just opens whatever paths it's given.
+ *
+ * `storage_path`: the Phase 5B encrypted secrets store — identity key,
+ * device credential key, KeyPackage bundles. `master_key` must be
+ * exactly 32 bytes from the platform keystore (Android Keystore / iOS
+ * Keychain); this function never generates or persists it. See
+ * storage.rs.
+ *
+ * `group_storage_path`: a *separate* SQLite database, deliberately not
+ * sharing a file or format with `storage_path` — persistent MLS group
+ * state (ratchet tree, epoch secrets, …), backed by OpenMLS's own
+ * official `openmls_sqlite_storage` crate. See group_storage.rs for why
+ * this is a different store rather than an extension of the Phase 5B
+ * snapshot format.
+ *
+ * Must be called before any other function in this module, and again
+ * any time the logged-in account changes — a call for a namespace
+ * that's already open is a no-op (same idempotency the previous
+ * process-wide-only design had); a call for a *different* namespace
+ * replaces the open stores, so a second account can never observe or
+ * reuse the first account's in-memory or on-disk E2EE identity.
+ */
+public func initialize(namespace: String, storagePath: String, groupStoragePath: String, masterKey: Data)throws   {try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
         uniffiCallStatus in
     uniffi_mls_core_fn_func_initialize(
+        FfiConverterString.lower(namespace),
         FfiConverterString.lower(storagePath),
+        FfiConverterString.lower(groupStoragePath),
         FfiConverterData.lower(masterKey),uniffiCallStatus
     )
 }
+}
+/**
+ * Joins a group from a Welcome message received from another device
+ * (via the server). Returns the group ID.
+ */
+public func joinGroupFromWelcome(welcomeBytes: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_join_group_from_welcome(
+        FfiConverterData.lower(welcomeBytes),uniffiCallStatus
+    )
+})
+}
+/**
+ * Joins from a Welcome, replacing this device's existing copy of the group
+ * only after the Welcome is verified to be for this device — see
+ * group.rs's `join_group_replacing`. Returns the group id.
+ */
+public func joinGroupReplacing(welcomeBytes: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_join_group_replacing(
+        FfiConverterData.lower(welcomeBytes),uniffiCallStatus
+    )
+})
+}
+/**
+ * Opens a payload from [`seal_call_signal`] sealed by another member of the
+ * group for the same call. `InvalidCiphertext` — never partial output — for
+ * anything tampered with or sealed for a different call, group, or epoch.
+ */
+public func openCallSignal(groupId: Data, callId: String, sealed: Data)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_open_call_signal(
+        FfiConverterData.lower(groupId),
+        FfiConverterString.lower(callId),
+        FfiConverterData.lower(sealed),uniffiCallStatus
+    )
+})
+}
+/**
+ * (Re)creates this device's copy of `group_id` with every device behind
+ * `key_packages` added in one commit — see group.rs's `rebuild_group`.
+ * Replaces `create_group` + repeated `add_member_to_group` for starting a
+ * conversation, and is also how a device that finds its copy of a group
+ * unusable (stale, forked, never joined) brings every device back onto
+ * one shared group.
+ */
+public func rebuildGroup(groupId: Data, keyPackages: [Data])throws  -> RebuiltGroupInfo  {
+    return try  FfiConverterTypeRebuiltGroupInfo_lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_rebuild_group(
+        FfiConverterData.lower(groupId),
+        FfiConverterSequenceData.lower(keyPackages),uniffiCallStatus
+    )
+})
+}
+/**
+ * Seals a call-signaling payload (an SDP offer/answer or ICE candidate, as
+ * text) for the other members of `group_id`, keyed for `call_id` through the
+ * MLS exporter — see call_signal.rs. Read-only on group state: no MLS
+ * message is created and nothing advances, so it can't affect chat
+ * message decryption.
+ */
+public func sealCallSignal(groupId: Data, callId: String, plaintext: String)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_seal_call_signal(
+        FfiConverterData.lower(groupId),
+        FfiConverterString.lower(callId),
+        FfiConverterString.lower(plaintext),uniffiCallStatus
+    )
+})
 }
 
 private enum InitializationResult {
@@ -888,6 +1350,24 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_mls_core_checksum_func_add_member_to_group() != 24667) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_create_group() != 36739) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_decrypt_message() != 3788) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_delete_group() != 22383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_diag_stores_state() != 35234) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_encrypt_message() != 41753) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mls_core_checksum_func_generate_device_credential() != 73) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -897,7 +1377,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mls_core_checksum_func_generate_key_packages() != 36240) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mls_core_checksum_func_initialize() != 34403) {
+    if (uniffi_mls_core_checksum_func_group_member_signature_keys() != 2052) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_initialize() != 35451) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_join_group_from_welcome() != 26381) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_join_group_replacing() != 48888) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_rebuild_group() != 44606) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_seal_call_signal() != 7720) {
         return InitializationResult.apiChecksumMismatch
     }
 

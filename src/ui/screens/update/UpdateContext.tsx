@@ -10,6 +10,9 @@ import {
   sha256File,
   type InstalledVersionInfo,
 } from '@/infrastructure/update/appUpdater';
+import { API_BASE_URL } from '@/infrastructure/network/trpcClient';
+import { tryAcrossSources, updateDownloadFailureMessage } from '@/infrastructure/network/transientFailures';
+import { apkDownloadSources } from '@/infrastructure/update/apkSources';
 import { fetchUpdateManifest, isApkUrlTrusted, isUpdateAvailable, type UpdateManifest } from '@/infrastructure/update/updateManifest';
 import { initMessageStore } from '@/infrastructure/storage/messageStore';
 
@@ -27,60 +30,49 @@ export type UpdateStatus =
 const DOWNLOAD_FILE_NAME = 'securemessenger-update.apk';
 
 /**
- * Transient failures (dropped connections, HTTP/2 stream resets like
- * REFUSED_STREAM, timeouts) are common enough on real networks — and on
- * some devices/carriers in particular — that a single failed attempt
- * shouldn't surface an error to the user. Retried with a short exponential
- * backoff; only the final attempt's failure is ever shown.
+ * Transient failures (a CDN answering 502/503/504, dropped connections,
+ * HTTP/2 stream resets like REFUSED_STREAM, timeouts) are common enough on
+ * real networks that one failed attempt shouldn't surface an error. Each
+ * round tries every source (see apkSources.ts) — so a 504 from GitHub's
+ * asset CDN falls straight through to the same file on our own server —
+ * and rounds are separated by a growing, jittered backoff. A source that
+ * answers 404/403 is not asked again. Previously four attempts ~7 seconds
+ * apart went to GitHub only, and the raw native error was shown.
  */
-const MAX_DOWNLOAD_ATTEMPTS = 4;
-const RETRY_BASE_DELAY_MS = 1000;
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const DOWNLOAD_ROUNDS = 4;
+const RETRY_BASE_DELAY_MS = 2000;
+const RETRY_MAX_DELAY_MS = 15000;
 
 /**
- * Downloads the update APK, retrying transient failures with backoff.
- * Every attempt — including the first — starts by discarding any
- * leftover partial file at `destination`, so a stream reset never leaves
- * a corrupt half-downloaded APK mistaken for a complete one (whether by
- * this retry loop or by a subsequent app session). Does not touch
- * SHA-256 verification or HTTPS enforcement — both still happen exactly
- * as before, after a download completes here.
+ * Downloads the update APK from the first source that delivers it. Every
+ * attempt starts by discarding any leftover partial file at `destination`,
+ * so a stream reset never leaves a corrupt half-downloaded APK mistaken for
+ * a complete one (whether by this retry loop or by a subsequent app
+ * session). Does not touch SHA-256 verification or HTTPS enforcement —
+ * both still happen exactly as before, after a download completes here.
  */
-async function downloadApkWithRetry(
-  url: string,
+async function downloadApk(
+  sources: readonly string[],
   destination: File,
   options: {
     onProgress: (data: { bytesWritten: number; totalBytes: number }) => void;
-    onAttemptStart?: (attempt: number) => void;
+    onAttemptStart?: () => void;
   },
 ): Promise<File> {
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
-    if (destination.exists) {
-      destination.delete();
-    }
-    options.onAttemptStart?.(attempt);
-    try {
-      return await File.downloadFileAsync(url, destination, {
-        idempotent: true,
-        onProgress: options.onProgress,
-      });
-    } catch (err) {
-      lastError = err;
-      if (attempt === MAX_DOWNLOAD_ATTEMPTS) break;
-      await delay(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
-    }
+  try {
+    return await tryAcrossSources(
+      sources,
+      async (url) => {
+        if (destination.exists) destination.delete();
+        options.onAttemptStart?.();
+        return File.downloadFileAsync(url, destination, { idempotent: true, onProgress: options.onProgress });
+      },
+      { maxRounds: DOWNLOAD_ROUNDS, baseDelayMs: RETRY_BASE_DELAY_MS, maxDelayMs: RETRY_MAX_DELAY_MS },
+    );
+  } catch (err) {
+    if (destination.exists) destination.delete();
+    throw err;
   }
-
-  if (destination.exists) {
-    destination.delete();
-  }
-  const lastMessage = lastError instanceof Error ? lastError.message : 'Unknown error';
-  throw new Error(`Could not download the update after ${MAX_DOWNLOAD_ATTEMPTS} attempts (${lastMessage}).`);
 }
 
 interface UpdateContextValue {
@@ -202,7 +194,8 @@ export function UpdateProvider({ children }: PropsWithChildren): React.JSX.Eleme
     try {
       const destination = new File(Paths.cache, DOWNLOAD_FILE_NAME);
 
-      const downloaded = await downloadApkWithRetry(manifest.apkUrl, destination, {
+      const sources = apkDownloadSources(manifest, API_BASE_URL).filter(isApkUrlTrusted);
+      const downloaded = await downloadApk(sources, destination, {
         onAttemptStart: () => setProgress(0),
         onProgress: (data) => {
           if (data.totalBytes > 0) {
@@ -255,13 +248,16 @@ export function UpdateProvider({ children }: PropsWithChildren): React.JSX.Eleme
       // tokens or credentials.
       console.error('[update] startUpdate failed', {
         apkUrl: manifest.apkUrl,
+        sources: apkDownloadSources(manifest, API_BASE_URL),
         name: err instanceof Error ? err.name : typeof err,
         message: err instanceof Error ? err.message : String(err),
         stack: err instanceof Error ? err.stack : undefined,
         cause: err instanceof Error ? err.cause : undefined,
       });
       setStatus('error');
-      setError(err instanceof Error ? err.message : 'Could not download the update.');
+      // A plain explanation (e.g. "temporarily unavailable (error 504)"),
+      // never the raw native rejection text.
+      setError(updateDownloadFailureMessage(err));
     }
   }, [manifest]);
 

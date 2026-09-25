@@ -678,6 +678,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_decrypt_message(
     ): Int
+    external fun uniffi_mls_core_checksum_func_delete_group(
+    ): Int
     external fun uniffi_mls_core_checksum_func_diag_stores_state(
     ): Int
     external fun uniffi_mls_core_checksum_func_encrypt_message(
@@ -688,11 +690,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_generate_key_packages(
     ): Int
+    external fun uniffi_mls_core_checksum_func_group_member_signature_keys(
+    ): Int
     external fun uniffi_mls_core_checksum_func_initialize(
     ): Int
     external fun uniffi_mls_core_checksum_func_join_group_from_welcome(
     ): Int
+    external fun uniffi_mls_core_checksum_func_join_group_replacing(
+    ): Int
     external fun uniffi_mls_core_checksum_func_open_call_signal(
+    ): Int
+    external fun uniffi_mls_core_checksum_func_rebuild_group(
     ): Int
     external fun uniffi_mls_core_checksum_func_seal_call_signal(
     ): Int
@@ -715,6 +723,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_mls_core_fn_func_decrypt_message(`groupId`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_delete_group(`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_mls_core_fn_func_diag_stores_state(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_encrypt_message(`groupId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -725,11 +735,17 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_generate_key_packages(`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_group_member_signature_keys(`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_initialize(`namespace`: RustBuffer.ByValue,`storagePath`: RustBuffer.ByValue,`groupStoragePath`: RustBuffer.ByValue,`masterKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_mls_core_fn_func_join_group_from_welcome(`welcomeBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_join_group_replacing(`welcomeBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_open_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`sealed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_rebuild_group(`groupId`: RustBuffer.ByValue,`keyPackages`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_seal_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -861,6 +877,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_mls_core_checksum_func_decrypt_message() != 3788) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_mls_core_checksum_func_delete_group() != 22383) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_diag_stores_state() != 35234) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -876,13 +895,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_mls_core_checksum_func_generate_key_packages() != 36240) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_mls_core_checksum_func_group_member_signature_keys() != 2052) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_initialize() != 35451) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_join_group_from_welcome() != 26381) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_mls_core_checksum_func_join_group_replacing() != 48888) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_mls_core_checksum_func_rebuild_group() != 44606) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_seal_call_signal() != 7720) {
@@ -1267,6 +1295,51 @@ public object FfiConverterTypeIdentityKeyInfo: FfiConverterRustBuffer<IdentityKe
 
 
 
+data class RebuiltGroupInfo (
+    /**
+     * One Welcome every included device joins from.
+     */
+    var `welcome`: kotlin.ByteArray
+    , 
+    /**
+     * Indices into the `key_packages` argument that were added; the rest
+     * were unusable or duplicates and must not be sent this Welcome.
+     */
+    var `included`: List<kotlin.UInt>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRebuiltGroupInfo: FfiConverterRustBuffer<RebuiltGroupInfo> {
+    override fun read(buf: ByteBuffer): RebuiltGroupInfo {
+        return RebuiltGroupInfo(
+            FfiConverterByteArray.read(buf),
+            FfiConverterSequenceUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RebuiltGroupInfo) = (
+            FfiConverterByteArray.allocationSize(value.`welcome`) +
+            FfiConverterSequenceUInt.allocationSize(value.`included`)
+    )
+
+    override fun write(value: RebuiltGroupInfo, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`welcome`, buf)
+            FfiConverterSequenceUInt.write(value.`included`, buf)
+    }
+}
+
+
+
 
 
 /**
@@ -1338,6 +1411,50 @@ sealed class MlsCoreException: kotlin.Exception() {
             get() = ""
     }
     
+    /**
+     * The message was encrypted in an epoch newer than this device's copy
+     * of the group: this device missed a membership change and its group
+     * state is stale. Retrying cannot help; only rejoining can.
+     */
+    class MessageFromFutureEpoch(
+        ) : MlsCoreException() {
+        override val message
+            get() = ""
+    }
+    
+    /**
+     * The message was encrypted in an epoch older than this device's copy
+     * of the group — e.g. sent before this device joined. MLS gives a new
+     * member no keys for epochs before it joined, by design.
+     */
+    class MessageFromPastEpoch(
+        ) : MlsCoreException() {
+        override val message
+            get() = ""
+    }
+    
+    /**
+     * MLS never lets a member decrypt its own messages (the key material
+     * is erased right after sending).
+     */
+    class OwnMessage(
+        ) : MlsCoreException() {
+        override val message
+            get() = ""
+    }
+    
+    /**
+     * A second copy of a message this device already decrypted (its key is
+     * single-use and already gone). Happens when a send reaches the server
+     * twice — a network-level retry of the same request. Nothing to show:
+     * the first copy was delivered.
+     */
+    class DuplicateMessage(
+        ) : MlsCoreException() {
+        override val message
+            get() = ""
+    }
+    
 
     
 
@@ -1366,6 +1483,10 @@ public object FfiConverterTypeMlsCoreError : FfiConverterRustBuffer<MlsCoreExcep
             7 -> MlsCoreException.GroupNotFound()
             8 -> MlsCoreException.GroupOperationFailed()
             9 -> MlsCoreException.InvalidCiphertext()
+            10 -> MlsCoreException.MessageFromFutureEpoch()
+            11 -> MlsCoreException.MessageFromPastEpoch()
+            12 -> MlsCoreException.OwnMessage()
+            13 -> MlsCoreException.DuplicateMessage()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -1405,6 +1526,22 @@ public object FfiConverterTypeMlsCoreError : FfiConverterRustBuffer<MlsCoreExcep
                 4UL
             )
             is MlsCoreException.InvalidCiphertext -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MlsCoreException.MessageFromFutureEpoch -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MlsCoreException.MessageFromPastEpoch -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MlsCoreException.OwnMessage -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is MlsCoreException.DuplicateMessage -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -1449,9 +1586,53 @@ public object FfiConverterTypeMlsCoreError : FfiConverterRustBuffer<MlsCoreExcep
                 buf.putInt(9)
                 Unit
             }
+            is MlsCoreException.MessageFromFutureEpoch -> {
+                buf.putInt(10)
+                Unit
+            }
+            is MlsCoreException.MessageFromPastEpoch -> {
+                buf.putInt(11)
+                Unit
+            }
+            is MlsCoreException.OwnMessage -> {
+                buf.putInt(12)
+                Unit
+            }
+            is MlsCoreException.DuplicateMessage -> {
+                buf.putInt(13)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceUInt: FfiConverterRustBuffer<List<kotlin.UInt>> {
+    override fun read(buf: ByteBuffer): List<kotlin.UInt> {
+        val len = buf.getInt()
+        return List<kotlin.UInt>(len) {
+            FfiConverterUInt.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.UInt>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterUInt.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.UInt>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterUInt.write(it, buf)
+        }
+    }
 }
 
 
@@ -1536,6 +1717,20 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
 }
     )
     }
+    
+
+        /**
+         * Removes this device's copy of a group, if any. Idempotent.
+         */
+    @Throws(MlsCoreException::class) fun `deleteGroup`(`groupId`: kotlin.ByteArray)
+        = 
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_delete_group(
+    
+        
+        FfiConverterByteArray.lower(`groupId`),_status)
+}
+    
     
  fun `diagStoresState`(): DiagStoresState {
             return FfiConverterTypeDiagStoresState.lift(
@@ -1631,6 +1826,21 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
     
 
         /**
+         * Signature public keys of every current member (public data only).
+         */
+    @Throws(MlsCoreException::class) fun `groupMemberSignatureKeys`(`groupId`: kotlin.ByteArray): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_group_member_signature_keys(
+    
+        
+        FfiConverterByteArray.lower(`groupId`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Opens (or creates) the local E2EE stores for one account.
          *
          * `namespace`: identifies *which account* these stores belong to —
@@ -1692,6 +1902,23 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
     
 
         /**
+         * Joins from a Welcome, replacing this device's existing copy of the group
+         * only after the Welcome is verified to be for this device — see
+         * group.rs's `join_group_replacing`. Returns the group id.
+         */
+    @Throws(MlsCoreException::class) fun `joinGroupReplacing`(`welcomeBytes`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_join_group_replacing(
+    
+        
+        FfiConverterByteArray.lower(`welcomeBytes`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Opens a payload from [`seal_call_signal`] sealed by another member of the
          * group for the same call. `InvalidCiphertext` — never partial output — for
          * anything tampered with or sealed for a different call, group, or epoch.
@@ -1705,6 +1932,27 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
         FfiConverterByteArray.lower(`groupId`),
         FfiConverterString.lower(`callId`),
         FfiConverterByteArray.lower(`sealed`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * (Re)creates this device's copy of `group_id` with every device behind
+         * `key_packages` added in one commit — see group.rs's `rebuild_group`.
+         * Replaces `create_group` + repeated `add_member_to_group` for starting a
+         * conversation, and is also how a device that finds its copy of a group
+         * unusable (stale, forked, never joined) brings every device back onto
+         * one shared group.
+         */
+    @Throws(MlsCoreException::class) fun `rebuildGroup`(`groupId`: kotlin.ByteArray, `keyPackages`: List<kotlin.ByteArray>): RebuiltGroupInfo {
+            return FfiConverterTypeRebuiltGroupInfo.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_rebuild_group(
+    
+        
+        FfiConverterByteArray.lower(`groupId`),
+        FfiConverterSequenceByteArray.lower(`keyPackages`),_status)
 }
     )
     }

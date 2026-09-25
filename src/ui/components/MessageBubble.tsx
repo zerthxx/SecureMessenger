@@ -140,6 +140,21 @@ export const MessageBubble = memo(function MessageBubble({ message, isOwn, onRet
     );
   }
 
+  // Same rule as above — never reads message.text. Not an error: MLS gives
+  // a device no keys for messages sent before it joined the conversation.
+  if (message.status === 'unavailable') {
+    return (
+      <View style={[styles.row, isOwn ? styles.rowOwn : styles.rowOther]}>
+        <View style={[styles.bubble, styles.failedBubble, { borderColor: theme.colors.border }]}>
+          <Ionicons name="lock-closed-outline" size={14} color={theme.colors.textTertiary} style={styles.failedIcon} />
+          <AppText variant="body" color="secondary" style={styles.failedText}>
+            Sent before this device joined the chat
+          </AppText>
+        </View>
+      </View>
+    );
+  }
+
   const isVoice = message.kind === 'voice';
   const isFailedSend = message.status === 'failed';
   const bubbleColor = isOwn ? theme.colors.primary : theme.colors.surfaceElevated;

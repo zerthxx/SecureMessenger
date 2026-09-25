@@ -25,6 +25,18 @@ class MlsCoreModule extends NativeModule<{}> {
   joinGroupFromWelcome(): Promise<never> {
     throw new Error('MlsCore is not supported on web.');
   }
+  rebuildGroup(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  joinGroupReplacing(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  deleteGroup(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  groupMemberSignatureKeys(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
   encryptMessage(): Promise<never> {
     throw new Error('MlsCore is not supported on web.');
   }

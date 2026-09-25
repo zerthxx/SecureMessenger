@@ -56,7 +56,7 @@ export function toMessage(row: MessageRow): Message {
     direction: row.direction,
     status: row.status,
     kind: row.kind,
-    text: row.status === 'decryption_failed' || row.kind === 'voice' ? null : row.plaintext,
+    text: row.status === 'decryption_failed' || row.status === 'unavailable' || row.kind === 'voice' ? null : row.plaintext,
     audioMediaId: row.audioMediaId,
     audioDurationMs: row.audioDurationMs,
     audioLocalUri: row.audioLocalUri,

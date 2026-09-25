@@ -256,6 +256,17 @@ export const e2eeApi = {
     withAuthRetry(() => untypedClient.query('e2ee.listActiveDeviceIds', input)) as Promise<
       Outputs['e2ee']['listActiveDeviceIds']
     >,
+
+  listConversationDevices: (input: Inputs['e2ee']['listConversationDevices']) =>
+    withAuthRetry(() => untypedClient.query('e2ee.listConversationDevices', input)) as Promise<
+      Outputs['e2ee']['listConversationDevices']
+    >,
+
+  keyPackageStatus: () =>
+    withAuthRetry(() => untypedClient.query('e2ee.keyPackageStatus')) as Promise<Outputs['e2ee']['keyPackageStatus']>,
+
+  resetGroup: (input: Inputs['e2ee']['resetGroup']) =>
+    withAuthRetry(() => untypedClient.mutation('e2ee.resetGroup', input)) as Promise<Outputs['e2ee']['resetGroup']>,
 };
 
 export const usersApi = {

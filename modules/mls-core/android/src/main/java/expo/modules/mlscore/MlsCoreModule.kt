@@ -11,6 +11,10 @@ import uniffi.mls_core.MlsCoreException
 import uniffi.mls_core.addMemberToGroup
 import uniffi.mls_core.createGroup
 import uniffi.mls_core.decryptMessage
+import uniffi.mls_core.deleteGroup
+import uniffi.mls_core.groupMemberSignatureKeys
+import uniffi.mls_core.joinGroupReplacing
+import uniffi.mls_core.rebuildGroup
 // TEMPORARY diagnostic import — see diagStoresState() call sites below.
 import uniffi.mls_core.diagStoresState
 import uniffi.mls_core.encryptMessage
@@ -274,6 +278,51 @@ class MlsCoreModule : Module() {
       requireInitialized()
       try {
         joinGroupFromWelcome(welcomeBytes)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    // (Re)creates the group with every given KeyPackage's device added in one
+    // commit — see rust/src/group.rs rebuild_group. `included` lists which
+    // KeyPackages (by index) made it in; only those devices get the Welcome.
+    AsyncFunction("rebuildGroup") { groupId: ByteArray, keyPackages: List<ByteArray> ->
+      requireInitialized()
+      try {
+        val rebuilt = rebuildGroup(groupId, keyPackages)
+        mapOf("welcome" to rebuilt.welcome, "included" to rebuilt.included.map { it.toInt() })
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    // Joins from a Welcome, replacing a stale local copy of the group only
+    // once the Welcome is verified to be for this device.
+    AsyncFunction("joinGroupReplacing") { welcomeBytes: ByteArray ->
+      requireInitialized()
+      try {
+        joinGroupReplacing(welcomeBytes)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    AsyncFunction("deleteGroup") { groupId: ByteArray ->
+      requireInitialized()
+      try {
+        deleteGroup(groupId)
+        null
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    // Public signature keys of the group's members — compared against the
+    // server's active devices to spot a signed-out device still in the group.
+    AsyncFunction("groupMemberSignatureKeys") { groupId: ByteArray ->
+      requireInitialized()
+      try {
+        groupMemberSignatureKeys(groupId)
       } catch (e: MlsCoreException) {
         throw MlsCoreRuntimeError(e)
       }

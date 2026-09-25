@@ -172,7 +172,7 @@ export function ConversationScreen(): React.JSX.Element {
     ({ item }: ListRenderItemInfo<Message>) => (
       <MessageBubble
         message={item}
-        isOwn={item.senderDeviceId === deviceId}
+        isOwn={item.direction === 'outgoing'}
         onRetry={handleRetry}
         onDownloadAudio={handleDownloadAudio}
       />

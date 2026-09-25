@@ -18,3 +18,10 @@ export interface DeviceCredentialInfo {
   /** Signature over credentialPublicKey by the account identity key. */
   crossSignature: Uint8Array;
 }
+
+export interface RebuiltGroupInfo {
+  /** One Welcome every included device joins from. */
+  welcome: Uint8Array;
+  /** Indices of the KeyPackages that were added; only those devices may be sent the Welcome. */
+  included: number[];
+}

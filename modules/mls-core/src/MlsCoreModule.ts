@@ -1,6 +1,6 @@
 import { NativeModule, requireNativeModule } from 'expo';
 
-import type { DeviceCredentialInfo, IdentityKeyInfo } from './MlsCore.types';
+import type { DeviceCredentialInfo, IdentityKeyInfo, RebuiltGroupInfo } from './MlsCore.types';
 
 declare class MlsCoreModule extends NativeModule<{}> {
   /** `userId`: the authenticated account's own stable id — see mlsCore.ts's `ensureMlsCoreInitialized` for why this must be the account id, not the per-login device id. */
@@ -12,6 +12,13 @@ declare class MlsCoreModule extends NativeModule<{}> {
   createGroup(groupId: Uint8Array): Promise<void>;
   addMemberToGroup(groupId: Uint8Array, keyPackageBytes: Uint8Array): Promise<Uint8Array>;
   joinGroupFromWelcome(welcomeBytes: Uint8Array): Promise<Uint8Array>;
+  /** (Re)creates the group with every KeyPackage's device added in one commit; see rust/src/group.rs `rebuild_group`. */
+  rebuildGroup(groupId: Uint8Array, keyPackages: Uint8Array[]): Promise<RebuiltGroupInfo>;
+  /** Joins from a Welcome, replacing a stale local copy of the group only after the Welcome is verified to be for this device. */
+  joinGroupReplacing(welcomeBytes: Uint8Array): Promise<Uint8Array>;
+  deleteGroup(groupId: Uint8Array): Promise<void>;
+  /** Public signature keys of the group's current members; empty if this device has no copy of the group. */
+  groupMemberSignatureKeys(groupId: Uint8Array): Promise<Uint8Array[]>;
   encryptMessage(groupId: Uint8Array, plaintext: string): Promise<Uint8Array>;
   decryptMessage(groupId: Uint8Array, ciphertext: Uint8Array): Promise<string>;
   /** Seals call signaling for the other member(s) of the group, keyed per call via the MLS exporter. Read-only on group state. */

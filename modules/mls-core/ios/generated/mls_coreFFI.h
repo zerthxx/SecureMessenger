@@ -243,6 +243,37 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ADD_MEMBER_TO_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ADD_MEMBER_TO_GROUP
+RustBuffer uniffi_mls_core_fn_func_add_member_to_group(RustBuffer group_id, RustBuffer key_package_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_CREATE_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_CREATE_GROUP
+void uniffi_mls_core_fn_func_create_group(RustBuffer group_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DECRYPT_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DECRYPT_MESSAGE
+RustBuffer uniffi_mls_core_fn_func_decrypt_message(RustBuffer group_id, RustBuffer ciphertext, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DELETE_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DELETE_GROUP
+void uniffi_mls_core_fn_func_delete_group(RustBuffer group_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DIAG_STORES_STATE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DIAG_STORES_STATE
+RustBuffer uniffi_mls_core_fn_func_diag_stores_state(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ENCRYPT_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ENCRYPT_MESSAGE
+RustBuffer uniffi_mls_core_fn_func_encrypt_message(RustBuffer group_id, RustBuffer plaintext, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_GENERATE_DEVICE_CREDENTIAL
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_GENERATE_DEVICE_CREDENTIAL
 RustBuffer uniffi_mls_core_fn_func_generate_device_credential(RustCallStatus *_Nonnull out_status
@@ -260,9 +291,39 @@ RustBuffer uniffi_mls_core_fn_func_generate_identity_key(RustCallStatus *_Nonnul
 RustBuffer uniffi_mls_core_fn_func_generate_key_packages(uint32_t count, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_GROUP_MEMBER_SIGNATURE_KEYS
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_GROUP_MEMBER_SIGNATURE_KEYS
+RustBuffer uniffi_mls_core_fn_func_group_member_signature_keys(RustBuffer group_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_INITIALIZE
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_INITIALIZE
-void uniffi_mls_core_fn_func_initialize(RustBuffer storage_path, RustBuffer master_key, RustCallStatus *_Nonnull out_status
+void uniffi_mls_core_fn_func_initialize(RustBuffer namespace, RustBuffer storage_path, RustBuffer group_storage_path, RustBuffer master_key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_JOIN_GROUP_FROM_WELCOME
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_JOIN_GROUP_FROM_WELCOME
+RustBuffer uniffi_mls_core_fn_func_join_group_from_welcome(RustBuffer welcome_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_JOIN_GROUP_REPLACING
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_JOIN_GROUP_REPLACING
+RustBuffer uniffi_mls_core_fn_func_join_group_replacing(RustBuffer welcome_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_OPEN_CALL_SIGNAL
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_OPEN_CALL_SIGNAL
+RustBuffer uniffi_mls_core_fn_func_open_call_signal(RustBuffer group_id, RustBuffer call_id, RustBuffer sealed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_REBUILD_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_REBUILD_GROUP
+RustBuffer uniffi_mls_core_fn_func_rebuild_group(RustBuffer group_id, RustBuffer key_packages, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_SEAL_CALL_SIGNAL
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_SEAL_CALL_SIGNAL
+RustBuffer uniffi_mls_core_fn_func_seal_call_signal(RustBuffer group_id, RustBuffer call_id, RustBuffer plaintext, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_MLS_CORE_RUSTBUFFER_ALLOC
@@ -525,6 +586,42 @@ void ffi_mls_core_rust_future_free_void(uint64_t handle
 void ffi_mls_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ADD_MEMBER_TO_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ADD_MEMBER_TO_GROUP
+uint16_t uniffi_mls_core_checksum_func_add_member_to_group(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_CREATE_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_CREATE_GROUP
+uint16_t uniffi_mls_core_checksum_func_create_group(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DECRYPT_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DECRYPT_MESSAGE
+uint16_t uniffi_mls_core_checksum_func_decrypt_message(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DELETE_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DELETE_GROUP
+uint16_t uniffi_mls_core_checksum_func_delete_group(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DIAG_STORES_STATE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DIAG_STORES_STATE
+uint16_t uniffi_mls_core_checksum_func_diag_stores_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ENCRYPT_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ENCRYPT_MESSAGE
+uint16_t uniffi_mls_core_checksum_func_encrypt_message(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_GENERATE_DEVICE_CREDENTIAL
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_GENERATE_DEVICE_CREDENTIAL
 uint16_t uniffi_mls_core_checksum_func_generate_device_credential(void
@@ -543,9 +640,45 @@ uint16_t uniffi_mls_core_checksum_func_generate_key_packages(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_GROUP_MEMBER_SIGNATURE_KEYS
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_GROUP_MEMBER_SIGNATURE_KEYS
+uint16_t uniffi_mls_core_checksum_func_group_member_signature_keys(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_INITIALIZE
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_INITIALIZE
 uint16_t uniffi_mls_core_checksum_func_initialize(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_JOIN_GROUP_FROM_WELCOME
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_JOIN_GROUP_FROM_WELCOME
+uint16_t uniffi_mls_core_checksum_func_join_group_from_welcome(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_JOIN_GROUP_REPLACING
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_JOIN_GROUP_REPLACING
+uint16_t uniffi_mls_core_checksum_func_join_group_replacing(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_OPEN_CALL_SIGNAL
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_OPEN_CALL_SIGNAL
+uint16_t uniffi_mls_core_checksum_func_open_call_signal(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_REBUILD_GROUP
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_REBUILD_GROUP
+uint16_t uniffi_mls_core_checksum_func_rebuild_group(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_SEAL_CALL_SIGNAL
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_SEAL_CALL_SIGNAL
+uint16_t uniffi_mls_core_checksum_func_seal_call_signal(void
     
 );
 #endif

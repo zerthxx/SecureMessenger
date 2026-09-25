@@ -147,7 +147,25 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
         await saveSession(toStoredSession(nextUser, nextSession));
         applySession(nextUser, nextSession);
       } catch (err) {
-        await clearAuth(isUnauthorized(err) ? 'session_ended' : null);
+        if (isUnauthorized(err)) {
+          // The server rejected the refresh token: this session really was ended.
+          await clearAuth('session_ended');
+          return;
+        }
+        // Offline, a timeout, or the server answering 5xx/504: says nothing
+        // about the session. This used to sign the user out (and delete the
+        // stored session) on every launch without a reachable server. Carry
+        // on with the stored session instead; the first call that needs a
+        // fresh access token refreshes it once the server is back (see
+        // performRefresh / trpcClient's withAuthRetry).
+        const nextUser: AuthUser = { id: stored.userId, username: stored.username, displayName: stored.displayName };
+        applySession(nextUser, {
+          accessToken: stored.accessToken,
+          accessTokenExpiresAt: stored.accessTokenExpiresAt,
+          refreshToken: stored.refreshToken,
+          refreshTokenExpiresAt: stored.refreshTokenExpiresAt,
+          deviceId: stored.deviceId,
+        });
       }
     })();
     // Runs once on mount only — this is an app-launch bootstrap, not a
