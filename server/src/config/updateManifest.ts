@@ -40,11 +40,12 @@ export interface UpdateManifest {
 // key) must uninstall and reinstall. Update this whole object (and bump
 // versionCode) the next time a signed release APK is cut and uploaded.
 export const CURRENT_UPDATE_MANIFEST: UpdateManifest = {
-  versionName: '0.8.0',
-  versionCode: 8,
-  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.8.0/app-release.apk',
-  sha256: '2aa6844be56a155a8f67a59e05d123aa0a9bfa0475a90f2ca34678ae63be6245',
+  versionName: '0.9.0',
+  versionCode: 9,
+  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.9.0/app-release.apk',
+  sha256: '26bccdbb6e1fb0461e7184cd9619647fc5fb8813aac745ad430b62e4d5a48289',
   releaseNotes:
-    "Add a profile photo, bio and birthday, and view other people's profiles. New Devices screen: see where you're signed in, end sessions, and get alerted about new logins.",
-  mandatory: false,
+    'More reliable encrypted messaging: no lost, duplicated or unreadable messages after a crash, a lost connection or a retry. Faster reconnects, instant sign-out, and the keyboard no longer covers the message box.',
+  // Required: conversations rebuilt by 0.9 use group generations that 0.8 can't read.
+  mandatory: true,
 };
