@@ -672,11 +672,15 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_mls_core_checksum_func_ack_decrypted(
+    ): Int
     external fun uniffi_mls_core_checksum_func_add_member_to_group(
     ): Int
     external fun uniffi_mls_core_checksum_func_create_group(
     ): Int
     external fun uniffi_mls_core_checksum_func_decrypt_message(
+    ): Int
+    external fun uniffi_mls_core_checksum_func_decrypt_message_once(
     ): Int
     external fun uniffi_mls_core_checksum_func_delete_group(
     ): Int
@@ -700,6 +704,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_open_call_signal(
     ): Int
+    external fun uniffi_mls_core_checksum_func_pending_decrypted_ids(
+    ): Int
     external fun uniffi_mls_core_checksum_func_rebuild_group(
     ): Int
     external fun uniffi_mls_core_checksum_func_seal_call_signal(
@@ -717,11 +723,15 @@ internal object UniffiLib {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "mls_core"))
         
     }
+    external fun uniffi_mls_core_fn_func_ack_decrypted(`messageIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_mls_core_fn_func_add_member_to_group(`groupId`: RustBuffer.ByValue,`keyPackageBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_create_group(`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_mls_core_fn_func_decrypt_message(`groupId`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_decrypt_message_once(`groupId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_delete_group(`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -744,6 +754,8 @@ internal object UniffiLib {
     external fun uniffi_mls_core_fn_func_join_group_replacing(`welcomeBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_open_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`sealed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_pending_decrypted_ids(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_rebuild_group(`groupId`: RustBuffer.ByValue,`keyPackages`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -868,6 +880,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_mls_core_checksum_func_ack_decrypted() != 21891) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_add_member_to_group() != 24667) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -875,6 +890,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_decrypt_message() != 3788) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_mls_core_checksum_func_decrypt_message_once() != 47628) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_delete_group() != 22383) {
@@ -908,6 +926,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_mls_core_checksum_func_pending_decrypted_ids() != 51710) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_rebuild_group() != 44606) {
@@ -1641,6 +1662,34 @@ public object FfiConverterSequenceUInt: FfiConverterRustBuffer<List<kotlin.UInt>
 /**
  * @suppress
  */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.ByteArray>> {
     override fun read(buf: ByteBuffer): List<kotlin.ByteArray> {
         val len = buf.getInt()
@@ -1662,6 +1711,20 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
         }
     }
 }
+        /**
+         * The app has stored these decrypted messages; their kept plaintext is dropped.
+         */
+    @Throws(MlsCoreException::class) fun `ackDecrypted`(`messageIds`: List<kotlin.String>)
+        = 
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_ack_decrypted(
+    
+        
+        FfiConverterSequenceString.lower(`messageIds`),_status)
+}
+    
+    
+
         /**
          * Adds a peer device (identified by its public KeyPackage bytes,
          * fetched from the server) to a group this device belongs to. Returns
@@ -1713,6 +1776,25 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
     
         
         FfiConverterByteArray.lower(`groupId`),
+        FfiConverterByteArray.lower(`ciphertext`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Crash-safe [`decrypt_message`] for the server row `message_id` — see
+         * group.rs `decrypt_message_once`. The app calls [`ack_decrypted`] once it
+         * has stored the result.
+         */
+    @Throws(MlsCoreException::class) fun `decryptMessageOnce`(`groupId`: kotlin.ByteArray, `messageId`: kotlin.String, `ciphertext`: kotlin.ByteArray): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_decrypt_message_once(
+    
+        
+        FfiConverterByteArray.lower(`groupId`),
+        FfiConverterString.lower(`messageId`),
         FfiConverterByteArray.lower(`ciphertext`),_status)
 }
     )
@@ -1932,6 +2014,20 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
         FfiConverterByteArray.lower(`groupId`),
         FfiConverterString.lower(`callId`),
         FfiConverterByteArray.lower(`sealed`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Message ids decrypted but not yet acknowledged (see [`decrypt_message_once`]).
+         */
+    @Throws(MlsCoreException::class) fun `pendingDecryptedIds`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_pending_decrypted_ids(
+    
+        _status)
 }
     )
     }

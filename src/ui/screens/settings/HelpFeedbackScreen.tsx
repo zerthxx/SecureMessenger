@@ -1,10 +1,9 @@
-import { useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import { useTheme } from '@/ui/theme';
-import { AppText, Button, Divider, TextField } from '@/ui/components';
-import { SectionLabel, SettingsCard, SettingsScreenFrame } from './SettingsSections';
+import { AppText, Divider } from '@/ui/components';
+import { SettingsCard, SettingsScreenFrame } from './SettingsSections';
 
 const HELP_TOPICS: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string }[] = [
   {
@@ -45,17 +44,15 @@ const HELP_TOPICS: { icon: keyof typeof Ionicons.glyphMap; title: string; body: 
 ];
 
 /**
- * Help content plus a feedback form. There is no feedback endpoint, support
- * inbox, or email integration anywhere in the project, so sending stays
- * disabled and the screen says so — nothing is ever reported as sent.
+ * Help content. The feedback form that used to follow it is hidden: there is
+ * no feedback endpoint or support inbox yet, so it could only ever say that
+ * nothing written there would be delivered — a dead end.
  */
 export function HelpFeedbackScreen(): React.JSX.Element {
   const theme = useTheme();
-  const [feedback, setFeedback] = useState('');
 
   return (
-    <SettingsScreenFrame title="Help & feedback">
-      <SectionLabel text="Help" />
+    <SettingsScreenFrame title="Help">
       <SettingsCard>
         {HELP_TOPICS.map((topic, index) => (
           <View key={topic.title}>
@@ -73,24 +70,6 @@ export function HelpFeedbackScreen(): React.JSX.Element {
         ))}
       </SettingsCard>
 
-      <SectionLabel text="Send feedback" />
-      <SettingsCard>
-        <View style={styles.feedback}>
-          <TextField
-            label="Your feedback"
-            value={feedback}
-            onChangeText={setFeedback}
-            placeholder="What's working, what isn't, what you'd like to see…"
-            multiline
-            maxLength={2000}
-          />
-          <AppText variant="caption" color="secondary">
-            Feedback can't be sent from the app yet: SecureMessenger doesn't have a feedback service or support inbox set up, so
-            nothing written here can be delivered.
-          </AppText>
-          <Button label="Send feedback" size="lg" fullWidth disabled />
-        </View>
-      </SettingsCard>
     </SettingsScreenFrame>
   );
 }
@@ -108,10 +87,5 @@ const styles = StyleSheet.create({
   topicText: {
     flex: 1,
     gap: 4,
-  },
-  feedback: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 12,
   },
 });

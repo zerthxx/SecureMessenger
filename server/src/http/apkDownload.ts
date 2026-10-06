@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs';
 
 import type { FastifyInstance } from 'fastify';
 
-import { checkRateLimit, RateLimitExceededError } from '../lib/rateLimit.js';
+import { checkRateLimit, ipBucket, RateLimitExceededError } from '../lib/rateLimit.js';
 import { getReleaseApk, releaseApkFileName, type ReleaseApk } from '../lib/releaseApk.js';
 
 export interface ApkDownloadOptions {
@@ -77,7 +77,7 @@ export async function apkDownloadRoutes(app: FastifyInstance, opts: ApkDownloadO
       }
 
       try {
-        checkRateLimit(`download:apk:ip:${req.ip}`, 30, 10 * 60 * 1000);
+        checkRateLimit(`download:apk:ip:${ipBucket(req.ip)}`, 30, 10 * 60 * 1000);
       } catch (err) {
         if (err instanceof RateLimitExceededError) {
           reply.header('Retry-After', String(Math.ceil(err.retryAfterMs / 1000)));

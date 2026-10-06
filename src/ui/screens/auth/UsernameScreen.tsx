@@ -1,14 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { KeyboardAvoidingView, ScrollView, StyleSheet, View } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
 import { useTheme } from '@/ui/theme';
 import { AppText, Button, StepDots, TextField, TopBar } from '@/ui/components';
 import { useAuth } from './AuthContext';
 import { useSignup } from './SignupContext';
-
-type AvailabilityState = 'idle' | 'checking' | 'available' | 'taken' | 'reserved' | 'invalid' | 'error';
+import { UsernameAvailabilityChecker, type AvailabilityState } from './usernameAvailability';
 
 export function UsernameScreen(): React.JSX.Element {
   const theme = useTheme();
@@ -16,36 +15,25 @@ export function UsernameScreen(): React.JSX.Element {
   const { username, setUsername } = useSignup();
   const { checkUsername } = useAuth();
   const [status, setStatus] = useState<AvailabilityState>('idle');
-  const requestId = useRef(0);
 
+  const checkUsernameRef = useRef(checkUsername);
+  checkUsernameRef.current = checkUsername;
+  const checkerRef = useRef<UsernameAvailabilityChecker | null>(null);
   useEffect(() => {
-    const trimmed = username.trim();
-    if (!trimmed) {
-      setStatus('idle');
-      return;
-    }
-    if (trimmed.length < 3) {
-      setStatus('invalid');
-      return;
-    }
-
-    setStatus('checking');
-    const thisRequest = ++requestId.current;
-    const timer = setTimeout(async () => {
-      try {
-        const result = await checkUsername(trimmed);
-        if (requestId.current !== thisRequest) return; // a newer keystroke superseded this check
-        if (result.available) {
-          setStatus('available');
-        } else {
-          setStatus((result.reason as AvailabilityState) ?? 'invalid');
-        }
-      } catch {
-        if (requestId.current === thisRequest) setStatus('error');
-      }
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [username, checkUsername]);
+    const checker = new UsernameAvailabilityChecker((name) => checkUsernameRef.current(name), setStatus);
+    checkerRef.current = checker;
+    return () => checker.dispose();
+  }, []);
+  useEffect(() => {
+    checkerRef.current?.update(username);
+  }, [username]);
+  // The screen stays mounted under the password steps; coming back to it
+  // (e.g. after the name was taken meanwhile) must not show an old answer.
+  useFocusEffect(
+    useCallback(() => {
+      checkerRef.current?.recheck();
+    }, []),
+  );
 
   const helper: Record<AvailabilityState, { text?: string; icon?: keyof typeof Ionicons.glyphMap; tone?: 'secondary' | 'danger' }> = {
     idle: { text: 'At least 3 characters: lowercase letters, numbers, underscore.' },
@@ -58,7 +46,7 @@ export function UsernameScreen(): React.JSX.Element {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={styles.flex} behavior="padding">
       <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
         <TopBar title="Choose a username" onBack={() => router.back()} />
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
@@ -76,6 +64,9 @@ export function UsernameScreen(): React.JSX.Element {
             errorText={status !== 'idle' && status !== 'checking' && status !== 'available' ? helper[status].text : undefined}
             helperText={status === 'idle' || status === 'checking' || status === 'available' ? helper[status].text : undefined}
           />
+          {status === 'error' ? (
+            <Button label="Try again" variant="secondary" onPress={() => checkerRef.current?.recheck()} />
+          ) : null}
           <Button
             label="Continue"
             size="lg"

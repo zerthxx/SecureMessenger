@@ -22,7 +22,8 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "allowBackup": false,
-      "softwareKeyboardLayoutMode": "resize"
+      "softwareKeyboardLayoutMode": "resize",
+      "blockedPermissions": ["android.permission.SYSTEM_ALERT_WINDOW"]
     },
     "plugins": [
       "expo-router",

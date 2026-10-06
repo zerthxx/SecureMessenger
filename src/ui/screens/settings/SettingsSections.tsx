@@ -7,7 +7,6 @@ import type { BirthdayVisibility, OwnProfile } from '@/domain/entities';
 import { AppText, Card, Divider, ListRow, TopBar } from '@/ui/components';
 import { useAuth } from '@/ui/screens/auth/AuthContext';
 import { useNotifications, type NotificationsState } from './NotificationsProvider';
-import { useSettingsPreferences } from './SettingsPreferencesProvider';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -171,21 +170,15 @@ function describeBirthdayPrivacy(profile: OwnProfile | null): string | undefined
 
 export function PrivacySection(): React.JSX.Element {
   const router = useRouter();
-  const { readReceipts, setReadReceipts, showLastSeen, setShowLastSeen } = useSettingsPreferences();
   const { profile } = useAuth();
 
+  // "Read receipts" and "Show last seen" are hidden until the app has
+  // either: the switches were only in-memory state that changed nothing —
+  // a privacy control that does nothing misleads the person relying on it.
   return (
     <>
       <SectionLabel text="Privacy" />
       <SettingsCard>
-        <SettingsRow>
-          <ListRow type="switch" icon="checkmark-done-outline" label="Read receipts" value={readReceipts} onValueChange={setReadReceipts} />
-        </SettingsRow>
-        <Divider inset={60} />
-        <SettingsRow>
-          <ListRow type="switch" icon="time-outline" label="Show last seen" value={showLastSeen} onValueChange={setShowLastSeen} />
-        </SettingsRow>
-        <Divider inset={60} />
         <SettingsRow>
           {/* Birthday visibility is stored with the profile on the server, so it's edited there. */}
           <ListRow
@@ -195,10 +188,7 @@ export function PrivacySection(): React.JSX.Element {
             onPress={() => router.push('/settings/edit-profile')}
           />
         </SettingsRow>
-        <Divider inset={60} />
-        <SettingsRow>
-          <ListRow icon="ban-outline" label="Blocked contacts" onPress={() => router.push('/settings/blocked-contacts')} />
-        </SettingsRow>
+        {/* "Blocked contacts" is hidden until blocking exists (settings/blocked-contacts stays routable). */}
       </SettingsCard>
     </>
   );

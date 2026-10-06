@@ -21,6 +21,8 @@ export interface VoicePlaybackState {
 let activePlayer: AudioPlayer | null = null;
 let activeMessageId: string | null = null;
 let removeStatusListener: (() => void) | null = null;
+/** Play was asked for and not since paused: still loading counts as playing, so the button doesn't flip back to Play while the clip buffers. */
+let playRequested = false;
 
 let state: VoicePlaybackState = { messageId: null, playing: false, currentTime: 0, duration: 0 };
 const listeners = new Set<(state: VoicePlaybackState) => void>();
@@ -46,12 +48,14 @@ export function stopVoicePlayback(): void {
   activePlayer?.remove();
   activePlayer = null;
   activeMessageId = null;
+  playRequested = false;
   setState({ messageId: null, playing: false, currentTime: 0, duration: 0 });
 }
 
 function onStatus(messageId: string, status: AudioStatus): void {
   if (activeMessageId !== messageId) return; // stale listener from a player we already tore down
-  setState({ messageId, playing: status.playing, currentTime: status.currentTime, duration: status.duration });
+  const loading = !status.isLoaded || status.isBuffering;
+  setState({ messageId, playing: status.playing || (playRequested && loading), currentTime: status.currentTime, duration: status.duration });
   if (status.didJustFinish) {
     stopVoicePlayback();
   }
@@ -59,6 +63,7 @@ function onStatus(messageId: string, status: AudioStatus): void {
 
 export function playVoiceMessage(messageId: string, uri: string): void {
   if (activeMessageId === messageId && activePlayer) {
+    playRequested = true;
     activePlayer.play();
     return;
   }
@@ -69,12 +74,14 @@ export function playVoiceMessage(messageId: string, uri: string): void {
   activeMessageId = messageId;
   const subscription = player.addListener('playbackStatusUpdate', (status) => onStatus(messageId, status));
   removeStatusListener = () => subscription.remove();
+  playRequested = true;
   player.play();
   setState({ messageId, playing: true, currentTime: 0, duration: player.duration });
 }
 
 export function pauseVoiceMessage(messageId: string): void {
   if (activeMessageId === messageId) {
+    playRequested = false;
     activePlayer?.pause();
   }
 }

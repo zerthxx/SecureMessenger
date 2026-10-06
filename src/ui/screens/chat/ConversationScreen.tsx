@@ -191,7 +191,10 @@ export function ConversationScreen(): React.JSX.Element {
   return (
     <KeyboardAvoidingView
       style={styles.flex}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      // Android too: the app draws edge to edge, where the window no longer
+      // shrinks for the keyboard (adjustResize), so without padding the
+      // keyboard covered the composer.
+      behavior="padding"
       keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}
     >
       <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>

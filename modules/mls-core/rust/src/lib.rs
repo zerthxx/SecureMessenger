@@ -397,6 +397,26 @@ pub fn decrypt_message(group_id: Vec<u8>, ciphertext: Vec<u8>) -> Result<String,
     with_group_store(|_store, group_provider| group::decrypt_message(group_provider, &group_id, &ciphertext))
 }
 
+/// Crash-safe [`decrypt_message`] for the server row `message_id` — see
+/// group.rs `decrypt_message_once`. The app calls [`ack_decrypted`] once it
+/// has stored the result.
+#[uniffi::export]
+pub fn decrypt_message_once(group_id: Vec<u8>, message_id: String, ciphertext: Vec<u8>) -> Result<String, MlsCoreError> {
+    with_group_store(|_store, group_provider| group::decrypt_message_once(group_provider, &group_id, &message_id, &ciphertext))
+}
+
+/// The app has stored these decrypted messages; their kept plaintext is dropped.
+#[uniffi::export]
+pub fn ack_decrypted(message_ids: Vec<String>) -> Result<(), MlsCoreError> {
+    with_group_store(|_store, group_provider| group::ack_decrypted(group_provider, &message_ids))
+}
+
+/// Message ids decrypted but not yet acknowledged (see [`decrypt_message_once`]).
+#[uniffi::export]
+pub fn pending_decrypted_ids() -> Result<Vec<String>, MlsCoreError> {
+    with_group_provider_read_only(|group_provider| group::pending_decrypted_ids(group_provider))
+}
+
 /// Like [`with_group_store`] minus the checkpoint, for operations that only
 /// read group state — a call's stream of signaling messages shouldn't
 /// rewrite the encrypted group-state blob each time.

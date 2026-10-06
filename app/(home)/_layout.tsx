@@ -48,8 +48,9 @@ export default function HomeLayout(): React.JSX.Element {
           },
         })}
       />
-      <Tabs.Screen name="stories" options={{ title: 'Stories', tabBarIcon: tabIcon('sparkles-outline', 'sparkles') }} />
-      <Tabs.Screen name="groups" options={{ title: 'Groups', tabBarIcon: tabIcon('people-outline', 'people') }} />
+      {/* Hidden until stories and group chats exist server-side: their screens are only "not available yet" placeholders. */}
+      <Tabs.Screen name="stories" options={{ href: null, title: 'Stories', tabBarIcon: tabIcon('sparkles-outline', 'sparkles') }} />
+      <Tabs.Screen name="groups" options={{ href: null, title: 'Groups', tabBarIcon: tabIcon('people-outline', 'people') }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: tabIcon('person-outline', 'person') }} />
     </Tabs>
   );

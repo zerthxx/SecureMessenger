@@ -71,6 +71,8 @@ export function BottomNav({ state, descriptors, navigation, insets }: BottomTabB
     >
       {state.routes.map((route, index) => {
         const { options } = descriptors[route.key] ?? {};
+        // `href: null` on a Tabs.Screen (expo-router) hides its tab this way.
+        if (StyleSheet.flatten(options?.tabBarItemStyle)?.display === 'none') return null;
         const isFocused = state.index === index;
         const label = (options?.title ?? route.name) as string;
         const tint = isFocused ? theme.colors.primary : theme.colors.textSecondary;

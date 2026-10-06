@@ -63,6 +63,10 @@ export function Button({
         onPressIn={() => !isDisabled && animateTo(0.96)}
         onPressOut={() => !isDisabled && animateTo(1)}
         accessibilityRole="button"
+        // Explicit, because the label text isn't rendered while loading (the
+        // spinner is): Android then described the button by its state alone,
+        // and kept saying "busy" after loading had finished.
+        accessibilityLabel={label}
         accessibilityState={{ disabled: isDisabled, busy: loading }}
         hitSlop={8}
         style={[

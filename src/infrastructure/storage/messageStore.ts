@@ -466,6 +466,51 @@ export function listRecentMessages(owner: string, conversationId: string, limit:
  * has — one query per sync instead of a lookup (and an upsert) per fetched
  * row.
  */
+/**
+ * A voice clip still marked "downloading" at startup was interrupted (the
+ * app was killed mid-download): nothing will ever finish it, and
+ * `fetchVoiceAudio` refuses to start one that looks in progress — it stayed
+ * stuck as "downloading" for good. Marked failed instead, so tapping it
+ * downloads again. Returns how many there were.
+ */
+export function resetInterruptedVoiceDownloads(owner: string): number {
+  assertOwnerUnchanged(owner);
+  return getDb().runSync(`UPDATE messages SET audio_state = 'failed' WHERE owner_user_id = ? AND audio_state = 'downloading'`, [owner]).changes;
+}
+
+/**
+ * Messages still marked "sending" at startup: the app was killed while they
+ * were on their way, so nothing will ever finish them and they had no retry
+ * button. Marked failed, and returned oldest first so they can be sent again
+ * in order. Only for a fresh start — never while sends may be in flight.
+ */
+export function failInterruptedSends(owner: string): { id: string; conversationId: string }[] {
+  assertOwnerUnchanged(owner);
+  const database = getDb();
+  const rows = database.getAllSync<{ id: string; conversation_id: string }>(
+    `SELECT id, conversation_id FROM messages WHERE owner_user_id = ? AND status = 'sending' ORDER BY local_created_at, created_at`,
+    [owner],
+  );
+  if (rows.length > 0) {
+    database.runSync(`UPDATE messages SET status = 'failed' WHERE owner_user_id = ? AND status = 'sending'`, [owner]);
+  }
+  return rows.map((row) => ({ id: row.id, conversationId: row.conversation_id }));
+}
+
+/** Which of these voice media ids already have their audio stored locally. */
+export function downloadedVoiceMediaIds(owner: string, mediaIds: string[]): Set<string> {
+  const found = new Set<string>();
+  for (let start = 0; start < mediaIds.length; start += 500) {
+    const chunk = mediaIds.slice(start, start + 500);
+    const rows = getDb().getAllSync<{ audio_media_id: string }>(
+      `SELECT audio_media_id FROM messages WHERE owner_user_id = ? AND audio_state = 'downloaded' AND audio_media_id IN (${chunk.map(() => '?').join(', ')})`,
+      [owner, ...chunk],
+    );
+    for (const row of rows) found.add(row.audio_media_id);
+  }
+  return found;
+}
+
 export function getStoredMessageStates(owner: string, ids: string[]): Map<string, { status: MessageStatus; createdAt: string }> {
   const states = new Map<string, { status: MessageStatus; createdAt: string }>();
   // Chunked to stay far below SQLite's bound-parameter limit.
@@ -565,6 +610,10 @@ export function setLocalGroupGeneration(owner: string, conversationId: string, g
 export function getAppState(key: string): string | null {
   const row = getDb().getFirstSync<{ value: string }>(`SELECT value FROM app_state WHERE key = ?`, [key]);
   return row?.value ?? null;
+}
+
+export function deleteAppState(key: string): void {
+  getDb().runSync(`DELETE FROM app_state WHERE key = ?`, [key]);
 }
 
 export function setAppState(key: string, value: string): void {

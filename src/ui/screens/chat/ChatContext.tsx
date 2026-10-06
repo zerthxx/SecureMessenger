@@ -21,7 +21,8 @@ import {
   type ConversationDevice,
 } from '@/infrastructure/crypto/groupSync';
 import {
-  decryptMessage,
+  ackDecrypted,
+  decryptMessageOnce,
   deleteGroup,
   encryptMessage,
   ensureMlsCoreInitialized,
@@ -30,12 +31,16 @@ import {
   generateKeyPackages,
   groupMemberSignatureKeys,
   joinGroupReplacing,
+  pendingDecryptedIds,
   rebuildGroup,
 } from '@/infrastructure/crypto/mlsCore';
 import { uuidToBytes } from '@/infrastructure/crypto/uuid';
 import { e2eeApi, getApiErrorMessage, usersApi } from '@/infrastructure/network/trpcClient';
 import { downloadVoiceBlob, uploadVoiceBlob } from '@/infrastructure/network/voiceMediaApi';
 import {
+  deleteAppState,
+  downloadedVoiceMediaIds,
+  failInterruptedSends,
   getAppState,
   getConversation,
   getLocalGroupGeneration,
@@ -45,9 +50,10 @@ import {
   getSyncCursor,
   initMessageStore,
   listLocalConversations,
-  recordMessage,
   reconcileSentMessageId,
+  recordMessage,
   refreshConversationPreview,
+  resetInterruptedVoiceDownloads,
   setAppState,
   setLocalGroupGeneration,
   setMessageStoreOwner,
@@ -86,6 +92,8 @@ const MEMBERSHIP_CHECK_MS = 5 * 60 * 1000;
  * behind the cursor; anything re-read inside this window is skipped by id.
  */
 const SYNC_OVERLAP_MS = 2 * 60 * 1000;
+/** Rows per fetchMessages page while syncing (the server allows up to 500). */
+const SYNC_PAGE_ROWS = 200;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -93,6 +101,62 @@ function nowIso(): string {
 
 function randomLocalId(): string {
   return `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const pendingCiphertextKey = (owner: string, localId: string) => `pendingCiphertext:${owner}:${localId}`;
+
+/** The id a voice clip's blob is decrypted under (see decryptMessageOnce) — distinct from any message row id. */
+const voiceBlobRowId = (mediaId: string) => `media:${mediaId}`;
+
+/**
+ * Tidies up after the app was killed while receiving (see
+ * decryptMessageOnce): kept plaintext of rows that did get stored is
+ * dropped, and voice downloads left half-done can be retried. Rows that were
+ * decrypted but not stored keep their plaintext; the next sync stores them.
+ * Local only, so it also runs offline. Best effort: it never blocks setup.
+ */
+async function recoverInterruptedReceives(owner: string): Promise<void> {
+  try {
+    if (getMessageStoreOwner() !== owner) return;
+    resetInterruptedVoiceDownloads(owner);
+    const pending = await pendingDecryptedIds(owner);
+    if (pending.length === 0 || getMessageStoreOwner() !== owner) return;
+    const rowIds = pending.filter((id) => !id.startsWith('media:'));
+    const mediaIds = pending.filter((id) => id.startsWith('media:')).map((id) => id.slice('media:'.length));
+    const storedRows = getStoredMessageStates(owner, rowIds);
+    const storedMedia = downloadedVoiceMediaIds(owner, mediaIds);
+    const done = [...rowIds.filter((id) => storedRows.has(id)), ...mediaIds.filter((id) => storedMedia.has(id)).map(voiceBlobRowId)];
+    await ackDecrypted(owner, done);
+  } catch {
+    // Nothing here is needed for messaging to work; the next start retries.
+  }
+}
+
+/**
+ * The ciphertext to send for one outgoing message in `generation`: the one
+ * its first attempt encrypted, when there is one for that generation. A
+ * send whose response was lost (a timeout, a dropped connection) may well
+ * have been stored; sending the very same bytes again lets the server's
+ * duplicate check (see e2ee.sendMessage) answer with that original message
+ * instead of storing a second copy, which the other side would get twice.
+ * Re-encrypting is only right once the group has changed, which refused the
+ * old ciphertext anyway. Cleared when the send is confirmed.
+ */
+async function sealOnce(owner: string, localId: string, generation: number, encrypt: () => Promise<Uint8Array>): Promise<string> {
+  const key = pendingCiphertextKey(owner, localId);
+  const saved = getAppState(key);
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved) as { generation?: unknown; ciphertext?: unknown };
+      if (parsed.generation === generation && typeof parsed.ciphertext === 'string') return parsed.ciphertext;
+    } catch {
+      // unreadable: encrypt again
+    }
+  }
+  const ciphertext = bytesToBase64(await encrypt());
+  if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+  setAppState(key, JSON.stringify({ generation, ciphertext }));
+  return ciphertext;
 }
 
 function sameConversationList(a: Conversation[], b: Conversation[]): boolean {
@@ -280,6 +344,9 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
    * initialization is complete before any `generateIdentityKey()` call.
    */
   const inFlightRef = useRef<Promise<void> | null>(null);
+  /** Sends the app was killed in the middle of, found at startup and resent once E2EE is ready (see failInterruptedSends). */
+  const interruptedSendsRef = useRef<{ id: string; conversationId: string }[]>([]);
+  const sendsRecoveredForRef = useRef(new Set<string>());
 
   const ensureE2eeSetup = useCallback((): Promise<void> => {
     if (!deviceId || !user) return Promise.resolve();
@@ -288,6 +355,12 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     const run = async () => {
       try {
         await ensureMlsCoreInitialized(user.id);
+        await recoverInterruptedReceives(user.id);
+        // Once per account per app start, before anything can be sending.
+        if (!sendsRecoveredForRef.current.has(user.id) && getMessageStoreOwner() === user.id) {
+          sendsRecoveredForRef.current.add(user.id);
+          interruptedSendsRef.current = failInterruptedSends(user.id);
+        }
 
         const identity = await generateIdentityKey();
         await e2eeApi.registerIdentityKey({ publicKey: bytesToBase64(identity.publicKey) });
@@ -339,11 +412,15 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     try {
       const blobCiphertext = await downloadVoiceBlob(conversationId, row.audioMediaId);
       if (getMessageStoreOwner() !== owner) return;
-      const base64Audio = await decryptMessage(owner, uuidToBytes(conversationId), blobCiphertext);
+      // Crash-safe like the messages themselves (see syncConversation): a
+      // download interrupted after decrypting can decrypt again.
+      const blobRowId = voiceBlobRowId(row.audioMediaId);
+      const base64Audio = await decryptMessageOnce(owner, uuidToBytes(conversationId), blobRowId, blobCiphertext);
       if (getMessageStoreOwner() !== owner) return;
       const uri = writeDownloadedAudio(owner, conversationId, row.audioMediaId, base64ToBytes(base64Audio));
       if (getMessageStoreOwner() !== owner) return;
       updateVoiceAudio(owner, messageId, { audioLocalUri: uri, audioState: 'downloaded' });
+      await ackDecrypted(owner, [blobRowId]).catch(() => {});
     } catch {
       if (getMessageStoreOwner() !== owner) return;
       updateVoiceAudio(owner, messageId, { audioState: 'failed' });
@@ -388,27 +465,9 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       if (!deviceId || !owner) return null;
       const cursor = getSyncCursor(owner, conversationId);
       const sinceCreatedAt = cursor ? new Date(Date.parse(cursor) - SYNC_OVERLAP_MS).toISOString() : undefined;
-      let fetched: Awaited<ReturnType<typeof e2eeApi.fetchMessages>>;
-      try {
-        fetched = await e2eeApi.fetchMessages(sinceCreatedAt ? { conversationId, sinceCreatedAt } : { conversationId });
-      } catch {
-        return null; // network/server failure this cycle — next poll will retry
-      }
-      if (getMessageStoreOwner() !== owner) return null;
-
-      const rows = orderForSync(fetched);
       const groupIdBytes = uuidToBytes(conversationId);
-      const stored = getStoredMessageStates(
-        owner,
-        rows.map((row) => row.id),
-      );
       let localGeneration = getLocalGroupGeneration(owner, conversationId);
       const welcomeProcessedKey = (id: string) => `welcome_processed:${id}`;
-      const welcome = pickWelcome(rows, localGeneration, (row) => getAppState(welcomeProcessedKey(row.id)) === '1');
-      const newestGeneration = rows.reduce((max, row) => Math.max(max, row.mlsGeneration), 0);
-      if (newestGeneration > (serverGenerationRef.current.get(conversationId) ?? 0)) {
-        serverGenerationRef.current.set(conversationId, newestGeneration);
-      }
 
       // Only a sync that actually wrote something re-renders the chat.
       let changed = false;
@@ -416,169 +475,223 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       let notMember = false;
       const failedGenerations: number[] = [];
       const own = { deviceId, userId: owner };
+      let syncedUpTo = cursor;
+      let afterCursor: string | undefined;
 
-      const recordUnreadable = (row: (typeof rows)[number], status: 'unavailable' | 'decryption_failed') => {
-        recordMessage(owner, {
-          id: row.id,
-          conversationId,
-          senderDeviceId: row.senderDeviceId,
-          direction: isFromOwnAccount(row, own) ? 'outgoing' : 'incoming',
-          status,
-          plaintext: null,
-          createdAt: row.createdAt,
-          localCreatedAt: row.createdAt,
-        });
-        changed = true;
-      };
-
-      rowLoop: for (const row of rows) {
+      // Page by page (SYNC_PAGE_ROWS each), oldest first: a long history no
+      // longer arrives in one response. Each page is fully handled — and the
+      // cursor moved past it — before the next is fetched.
+      for (;;) {
+        let fetched: Awaited<ReturnType<typeof e2eeApi.fetchMessages>>;
+        try {
+          fetched = await e2eeApi.fetchMessages({
+            conversationId,
+            ...(sinceCreatedAt ? { sinceCreatedAt } : {}),
+            page: { limit: SYNC_PAGE_ROWS, ...(afterCursor ? { after: afterCursor } : {}) },
+          });
+        } catch {
+          if (!afterCursor) return null; // network/server failure this cycle — next poll will retry
+          complete = false; // the pages so far stand; the next sync carries on from them
+          break;
+        }
         if (getMessageStoreOwner() !== owner) return null;
 
-        // `stored` was read before this loop's first await. A row it doesn't
-        // list as processed may have been written since (e.g. our own send
-        // confirming under its server id), so that row is re-read
-        // synchronously right before acting on it.
-        let existing = stored.get(row.id) ?? null;
-        if (row.messageType === 'application' && (!existing || existing.status === 'sending')) {
-          const fresh = getMessageById(owner, row.id);
-          existing = fresh ? { status: fresh.status, createdAt: fresh.createdAt } : null;
+        const rows = orderForSync(fetched);
+        const decryptedThisPage: string[] = [];
+        const stored = getStoredMessageStates(
+          owner,
+          rows.map((row) => row.id),
+        );
+        // Also sees this device's newer Welcomes from beyond the page (the
+        // server sends them along), so older rows are never mistaken for a
+        // group this device isn't in.
+        const welcome = pickWelcome(rows, localGeneration, (row) => getAppState(welcomeProcessedKey(row.id)) === '1');
+        const newestGeneration = rows.reduce((max, row) => Math.max(max, row.mlsGeneration), 0);
+        if (newestGeneration > (serverGenerationRef.current.get(conversationId) ?? 0)) {
+          serverGenerationRef.current.set(conversationId, newestGeneration);
         }
 
-        const action = planRow(row, {
-          localGeneration,
-          targetGeneration: welcome?.mlsGeneration ?? 0,
-          welcomeToJoinId: welcome?.id ?? null,
-          ownDeviceId: deviceId,
-          stored: existing !== null && existing.status !== 'sending',
-        });
+        const recordUnreadable = (row: (typeof rows)[number], status: 'unavailable' | 'decryption_failed') => {
+          recordMessage(owner, {
+            id: row.id,
+            conversationId,
+            senderDeviceId: row.senderDeviceId,
+            direction: isFromOwnAccount(row, own) ? 'outgoing' : 'incoming',
+            status,
+            plaintext: null,
+            createdAt: row.createdAt,
+            localCreatedAt: row.createdAt,
+          });
+          changed = true;
+        };
 
-        switch (action) {
-          case 'join': {
-            try {
-              await joinGroupReplacing(owner, base64ToBytes(row.ciphertext));
-              if (getMessageStoreOwner() !== owner) return null;
-              setLocalGroupGeneration(owner, conversationId, row.mlsGeneration);
-              localGeneration = row.mlsGeneration;
-            } catch (err) {
-              if (getMessageStoreOwner() !== owner) return null;
-              if (!isPermanentWelcomeFailure(err)) {
-                // Storage hiccup: try this Welcome again on the next sync.
-                complete = false;
-                break rowLoop;
-              }
-              // Not usable by this device (its KeyPackage is gone, e.g. app
-              // data was cleared). Never retried; the rows of its group show
-              // up as `not_member` below and this device rebuilds.
-            }
-            setAppState(welcomeProcessedKey(row.id), '1');
-            changed = true;
-            break;
+        rowLoop: for (const row of rows) {
+          if (getMessageStoreOwner() !== owner) return null;
+
+          // `stored` was read before this loop's first await. A row it doesn't
+          // list as processed may have been written since (e.g. our own send
+          // confirming under its server id), so that row is re-read
+          // synchronously right before acting on it.
+          let existing = stored.get(row.id) ?? null;
+          if (row.messageType === 'application' && (!existing || existing.status === 'sending')) {
+            const fresh = getMessageById(owner, row.id);
+            existing = fresh ? { status: fresh.status, createdAt: fresh.createdAt } : null;
           }
-          case 'skip_welcome':
-            if (getAppState(welcomeProcessedKey(row.id)) !== '1') setAppState(welcomeProcessedKey(row.id), '1');
-            break;
-          case 'already_stored':
-            // Already decrypted (or recorded as unreadable), so never
-            // decrypted again. The only thing the server can still correct is
-            // the ordering timestamp; content, status, kind and audio
-            // metadata stay exactly as stored.
-            if (existing && existing.createdAt !== row.createdAt) {
-              updateMessageCreatedAt(owner, row.id, row.createdAt);
+
+          const action = planRow(row, {
+            localGeneration,
+            targetGeneration: welcome?.mlsGeneration ?? 0,
+            welcomeToJoinId: welcome?.id ?? null,
+            ownDeviceId: deviceId,
+            stored: existing !== null && existing.status !== 'sending',
+          });
+
+          switch (action) {
+            case 'join': {
+              try {
+                await joinGroupReplacing(owner, base64ToBytes(row.ciphertext));
+                if (getMessageStoreOwner() !== owner) return null;
+                setLocalGroupGeneration(owner, conversationId, row.mlsGeneration);
+                localGeneration = row.mlsGeneration;
+              } catch (err) {
+                if (getMessageStoreOwner() !== owner) return null;
+                if (!isPermanentWelcomeFailure(err)) {
+                  // Storage hiccup: try this Welcome again on the next sync.
+                  complete = false;
+                  break rowLoop;
+                }
+                // Not usable by this device (its KeyPackage is gone, e.g. app
+                // data was cleared). Never retried; the rows of its group show
+                // up as `not_member` below and this device rebuilds.
+              }
+              setAppState(welcomeProcessedKey(row.id), '1');
               changed = true;
+              break;
             }
-            break;
-          case 'old_generation':
-          case 'own_message_lost':
-            // Sent before this device joined the current group, or this
-            // device's own message whose local copy is gone: MLS never gives
-            // this device the keys for either. Not an error.
-            recordUnreadable(row, 'unavailable');
-            break;
-          case 'not_member':
-            // From a group this device isn't in. Leave the row (and the
-            // cursor) alone; the caller rebuilds the group.
-            notMember = true;
-            complete = false;
-            break rowLoop;
-          case 'decrypt': {
-            let plaintext: string;
-            try {
-              plaintext = await decryptMessage(owner, groupIdBytes, base64ToBytes(row.ciphertext));
-            } catch (err) {
-              if (getMessageStoreOwner() !== owner) return null;
-              switch (classifyMlsError(err)) {
-                case 'duplicate':
-                  // The same send stored twice (a network-level retry); the
-                  // first copy was decrypted and is shown. Nothing to add.
-                  continue rowLoop;
-                case 'own_message':
-                case 'past_epoch':
-                  recordUnreadable(row, 'unavailable');
-                  continue rowLoop;
-                case 'transient':
-                  complete = false;
-                  break rowLoop;
-                case 'no_group':
-                  // The local group is gone; rebuilding brings it back.
-                  failedGenerations.push(row.mlsGeneration);
-                  complete = false;
-                  break rowLoop;
-                case 'future_epoch':
-                case 'invalid':
-                  // Tampered, or this device's copy of the group is stale or
-                  // forked. Never fall back to displaying raw ciphertext or
-                  // any guessed content — record an explicit failure the UI
-                  // renders as such, and rebuild so later messages are
-                  // readable again.
-                  recordUnreadable(row, 'decryption_failed');
-                  failedGenerations.push(row.mlsGeneration);
-                  continue rowLoop;
+            case 'skip_welcome':
+              if (getAppState(welcomeProcessedKey(row.id)) !== '1') setAppState(welcomeProcessedKey(row.id), '1');
+              break;
+            case 'already_stored':
+              // Already decrypted (or recorded as unreadable), so never
+              // decrypted again. The only thing the server can still correct is
+              // the ordering timestamp; content, status, kind and audio
+              // metadata stay exactly as stored.
+              if (existing && existing.createdAt !== row.createdAt) {
+                updateMessageCreatedAt(owner, row.id, row.createdAt);
+                changed = true;
               }
-              continue rowLoop;
-            }
-            if (getMessageStoreOwner() !== owner) return null;
-            const voiceEnvelope = parseVoiceEnvelope(plaintext);
-            const outgoing = isFromOwnAccount(row, own);
-            recordMessage(owner, {
-              id: row.id,
-              conversationId,
-              senderDeviceId: row.senderDeviceId,
-              direction: outgoing ? 'outgoing' : 'incoming',
-              status: 'decrypted',
-              kind: voiceEnvelope ? 'voice' : 'text',
-              plaintext: voiceEnvelope ? null : plaintext,
-              audioMediaId: voiceEnvelope?.mediaId ?? null,
-              audioDurationMs: voiceEnvelope?.durationMs ?? null,
-              audioState: voiceEnvelope ? 'idle' : null,
-              createdAt: row.createdAt,
-              localCreatedAt: row.createdAt,
-            });
-            changed = true;
-
-            const notify = notifyContextRef.current;
-            if (!outgoing && Date.parse(row.createdAt) >= notify.sessionStartedAt && notify.shouldPresentLocally()) {
-              const conversation = notify.conversations.find((c) => c.id === conversationId);
-              presentNewMessageNotification({
-                conversationId,
-                title: conversation?.otherDisplayName ?? 'SecureMessenger',
-                body: voiceEnvelope ? 'Voice message' : 'New message',
-              }).catch(() => {});
-            }
-            if (voiceEnvelope) {
-              await fetchVoiceAudio(owner, conversationId, row.id);
+              break;
+            case 'old_generation':
+            case 'own_message_lost':
+              // Sent before this device joined the current group, or this
+              // device's own message whose local copy is gone: MLS never gives
+              // this device the keys for either. Not an error.
+              recordUnreadable(row, 'unavailable');
+              break;
+            case 'not_member':
+              // From a group this device isn't in. Leave the row (and the
+              // cursor) alone; the caller rebuilds the group.
+              notMember = true;
+              complete = false;
+              break rowLoop;
+            case 'decrypt': {
+              let plaintext: string;
+              try {
+                // Crash-safe: if the app dies before the result below is
+                // stored, the next sync decrypts this row again and gets the
+                // same plaintext (MLS alone would refuse it as already used).
+                plaintext = await decryptMessageOnce(owner, groupIdBytes, row.id, base64ToBytes(row.ciphertext));
+              } catch (err) {
+                if (getMessageStoreOwner() !== owner) return null;
+                switch (classifyMlsError(err)) {
+                  case 'duplicate':
+                    // The same send stored twice (a network-level retry); the
+                    // first copy was decrypted and is shown. Nothing to add.
+                    continue rowLoop;
+                  case 'own_message':
+                  case 'past_epoch':
+                    recordUnreadable(row, 'unavailable');
+                    continue rowLoop;
+                  case 'transient':
+                    complete = false;
+                    break rowLoop;
+                  case 'no_group':
+                    // The local group is gone; rebuilding brings it back.
+                    failedGenerations.push(row.mlsGeneration);
+                    complete = false;
+                    break rowLoop;
+                  case 'future_epoch':
+                  case 'invalid':
+                    // Tampered, or this device's copy of the group is stale or
+                    // forked. Never fall back to displaying raw ciphertext or
+                    // any guessed content — record an explicit failure the UI
+                    // renders as such, and rebuild so later messages are
+                    // readable again.
+                    recordUnreadable(row, 'decryption_failed');
+                    failedGenerations.push(row.mlsGeneration);
+                    continue rowLoop;
+                }
+                continue rowLoop;
+              }
               if (getMessageStoreOwner() !== owner) return null;
+              const voiceEnvelope = parseVoiceEnvelope(plaintext);
+              const outgoing = isFromOwnAccount(row, own);
+              recordMessage(owner, {
+                id: row.id,
+                conversationId,
+                senderDeviceId: row.senderDeviceId,
+                direction: outgoing ? 'outgoing' : 'incoming',
+                status: 'decrypted',
+                kind: voiceEnvelope ? 'voice' : 'text',
+                plaintext: voiceEnvelope ? null : plaintext,
+                audioMediaId: voiceEnvelope?.mediaId ?? null,
+                audioDurationMs: voiceEnvelope?.durationMs ?? null,
+                audioState: voiceEnvelope ? 'idle' : null,
+                createdAt: row.createdAt,
+                localCreatedAt: row.createdAt,
+              });
+              changed = true;
+              decryptedThisPage.push(row.id);
+
+              const notify = notifyContextRef.current;
+              if (!outgoing && Date.parse(row.createdAt) >= notify.sessionStartedAt && notify.shouldPresentLocally()) {
+                const conversation = notify.conversations.find((c) => c.id === conversationId);
+                presentNewMessageNotification({
+                  conversationId,
+                  title: conversation?.otherDisplayName ?? 'SecureMessenger',
+                  body: voiceEnvelope ? 'Voice message' : 'New message',
+                }).catch(() => {});
+              }
+              if (voiceEnvelope) {
+                await fetchVoiceAudio(owner, conversationId, row.id);
+                if (getMessageStoreOwner() !== owner) return null;
+              }
+              break;
             }
-            break;
           }
         }
+
+        if (getMessageStoreOwner() !== owner) return null;
+        // Stored now, so the native side can forget their plaintext. A
+        // failure here only leaves them for the sweep at the next start.
+        await ackDecrypted(owner, decryptedThisPage).catch(() => {});
+        if (getMessageStoreOwner() !== owner) return null;
+        if (!complete) break;
+        // Out-of-page Welcomes say nothing about how far this sync got.
+        const inPage = fetched.filter((row) => !('outOfPage' in row && row.outOfPage));
+        const newest = inPage.reduce<string | null>((max, row) => (max === null || row.createdAt > max ? row.createdAt : max), null);
+        if (newest && (!syncedUpTo || newest > syncedUpTo)) {
+          setSyncCursor(owner, conversationId, newest);
+          syncedUpTo = newest;
+        }
+        // A server from before paging ignores `page` and sends no cursor:
+        // its single response is everything.
+        const last = inPage[inPage.length - 1];
+        if (inPage.length < SYNC_PAGE_ROWS || !last || !('cursor' in last) || !last.cursor) break;
+        afterCursor = last.cursor;
       }
 
       if (getMessageStoreOwner() !== owner) return null;
-      const first = fetched[0];
-      if (complete && first) {
-        const newest = fetched.reduce((max, row) => (row.createdAt > max ? row.createdAt : max), first.createdAt);
-        if (!cursor || newest > cursor) setSyncCursor(owner, conversationId, newest);
-      }
       if (changed) {
         refreshConversationPreview(owner, conversationId);
         notifyConversationChanged(conversationId);
@@ -1079,10 +1192,10 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       try {
         const groupIdBytes = uuidToBytes(conversationId);
         const { messageId, createdAt } = await encryptAndSend(owner, conversationId, async (generation) => {
-          const ciphertext = await encryptMessage(owner, groupIdBytes, text);
+          const ciphertext = await sealOnce(owner, localId, generation, () => encryptMessage(owner, groupIdBytes, text));
           return e2eeApi.sendMessage({
             conversationId,
-            ciphertext: bytesToBase64(ciphertext),
+            ciphertext,
             messageType: 'application',
             mlsGeneration: generation,
           });
@@ -1091,6 +1204,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         // The server's own timestamp when it returns one (older servers
         // don't), so ordering is right before the next sync confirms it.
         reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
+        deleteAppState(pendingCiphertextKey(owner, localId));
       } catch {
         if (getMessageStoreOwner() !== owner) return;
         updateMessageStatus(owner, localId, 'failed');
@@ -1156,17 +1270,19 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           }
 
           const envelope = buildVoiceEnvelope({ mediaId, durationMs, byteSize: bytes.length, mimeType: 'audio/m4a' });
-          const metadataCiphertext = await encryptMessage(owner, groupIdBytes, envelope);
-          if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+          // Same generation means the same uploaded blob (see above), so a
+          // saved envelope still references it.
+          const metadataCiphertext = await sealOnce(owner, localId, generation, () => encryptMessage(owner, groupIdBytes, envelope));
           return e2eeApi.sendMessage({
             conversationId,
-            ciphertext: bytesToBase64(metadataCiphertext),
+            ciphertext: metadataCiphertext,
             messageType: 'application',
             mlsGeneration: generation,
           });
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
         reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
+        deleteAppState(pendingCiphertextKey(owner, localId));
       } catch {
         if (getMessageStoreOwner() !== owner) return;
         updateMessageStatus(owner, localId, 'failed');
@@ -1297,6 +1413,20 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     },
     [attemptSend, attemptSendVoice],
   );
+
+  // Sends again what the app was killed in the middle of sending. Safe to
+  // repeat: a retry sends the very same ciphertext (sealOnce), so one that
+  // did reach the server is answered there with the original message.
+  useEffect(() => {
+    if (!e2eeReady) return;
+    const pending = interruptedSendsRef.current.splice(0);
+    if (pending.length === 0) return;
+    void (async () => {
+      for (const { id, conversationId } of pending) {
+        await retryMessage(conversationId, id).catch(() => {});
+      }
+    })();
+  }, [e2eeReady, retryMessage]);
 
   const searchUsers = useCallback(async (query: string): Promise<UserSearchResult[]> => {
     if (!query.trim()) return [];

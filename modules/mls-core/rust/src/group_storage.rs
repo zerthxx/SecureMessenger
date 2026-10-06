@@ -79,10 +79,14 @@
 //! process is killed between two checkpoints) is documented in the Phase
 //! 5D report's "remaining risks".
 //!
-//! Application message *plaintext* is never written to this database or
-//! anywhere else on disk — see group.rs: it exists only as a function
-//! argument/return value, in process memory, for the duration of a
-//! single encrypt/decrypt call.
+//! Application message *plaintext* is never written to this database —
+//! with one deliberate exception: a received message's plaintext is kept
+//! in `app_pending_plaintext` from the moment it is decrypted until the app
+//! confirms it has stored the message (group.rs `decrypt_message_once`).
+//! It is written in the same checkpoint as the ratchet step that consumed
+//! the message's key, and so encrypted at rest exactly like the group's own
+//! secrets; without it, a crash between those two writes lost the message
+//! for good (its key was already gone).
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -273,6 +277,9 @@ impl GroupProvider {
 
         let mut storage = SqliteStorageProvider::<BincodeCodec, Connection>::new(primary);
         storage.run_migrations().map_err(|e| e.to_string())?;
+        open_shared_memory_connection(&memory_uri)?
+            .execute(PENDING_PLAINTEXT_TABLE_SQL, [])
+            .map_err(|e| e.to_string())?;
 
         Ok(Self {
             crypto: RustCrypto::default(),
@@ -298,6 +305,59 @@ impl GroupProvider {
         fs::write(&write_tmp, &encrypted).map_err(|e| e.to_string())?;
         fs::rename(&write_tmp, &self.blob_path).map_err(|e| e.to_string())?;
         Ok(())
+    }
+}
+
+/// Decrypted messages the app hasn't confirmed storing yet — see
+/// group.rs `decrypt_message_once`. Lives in the same in-memory database as
+/// the group state, so it is written in the same checkpoint as the ratchet
+/// step that produced it, and encrypted at rest with it.
+const PENDING_PLAINTEXT_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS app_pending_plaintext (
+    message_id TEXT PRIMARY KEY NOT NULL,
+    ciphertext_sha256 BLOB NOT NULL,
+    plaintext TEXT NOT NULL
+)";
+
+impl GroupProvider {
+    pub fn pending_plaintext(&self, message_id: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+        let conn = open_shared_memory_connection(&self.memory_uri)?;
+        let mut statement = conn
+            .prepare("SELECT ciphertext_sha256, plaintext FROM app_pending_plaintext WHERE message_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut rows = statement.query([message_id]).map_err(|e| e.to_string())?;
+        match rows.next().map_err(|e| e.to_string())? {
+            Some(row) => Ok(Some((row.get(0).map_err(|e| e.to_string())?, row.get(1).map_err(|e| e.to_string())?))),
+            None => Ok(None),
+        }
+    }
+
+    pub fn put_pending_plaintext(&self, message_id: &str, ciphertext_sha256: &[u8], plaintext: &str) -> Result<(), String> {
+        open_shared_memory_connection(&self.memory_uri)?
+            .execute(
+                "INSERT OR REPLACE INTO app_pending_plaintext (message_id, ciphertext_sha256, plaintext) VALUES (?1, ?2, ?3)",
+                rusqlite::params![message_id, ciphertext_sha256, plaintext],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn delete_pending_plaintext(&self, message_ids: &[String]) -> Result<(), String> {
+        let conn = open_shared_memory_connection(&self.memory_uri)?;
+        for id in message_ids {
+            conn.execute("DELETE FROM app_pending_plaintext WHERE message_id = ?1", [id]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn pending_plaintext_ids(&self) -> Result<Vec<String>, String> {
+        let conn = open_shared_memory_connection(&self.memory_uri)?;
+        let mut statement = conn.prepare("SELECT message_id FROM app_pending_plaintext").map_err(|e| e.to_string())?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ids)
     }
 }
 

@@ -237,6 +237,33 @@ describe('CallRegistry', () => {
     assert.equal(calls.size, 0);
   });
 
+  test('a callee device that missed the end of a call learns it is over by fetching the invite again', () => {
+    // The app re-fetches a call it is still ringing for after its socket
+    // reconnects (e.g. Android froze it in the background and the server's
+    // heartbeat dropped the socket), so a stale call can't block later calls.
+    invite();
+    outbox.take();
+    outbox.connected.delete(bobPhone.deviceId);
+    timers.advance(RING_TIMEOUT_MS);
+    assert.equal(outbox.take()[bobPhone.deviceId], undefined);
+
+    outbox.connect(bobPhone);
+    calls.fetch(bobPhone, CALL);
+    assert.deepEqual(outbox.take(), { [bobPhone.deviceId]: [{ type: 'call.ended', callId: CALL, reason: 'cancelled' }] });
+  });
+
+  test('a callee device that was away while another of its devices answered is told so when it fetches the invite', () => {
+    outbox.connect(bobTablet);
+    invite();
+    outbox.connected.delete(bobPhone.deviceId);
+    calls.accept(bobTablet, CALL, 'YW5zd2Vy');
+    outbox.take();
+
+    outbox.connect(bobPhone);
+    calls.fetch(bobPhone, CALL);
+    assert.deepEqual(outbox.take(), { [bobPhone.deviceId]: [{ type: 'call.ended', callId: CALL, reason: 'answered_elsewhere' }] });
+  });
+
   test('the caller hanging up while ringing cancels it for every callee device', () => {
     invite();
     outbox.take();

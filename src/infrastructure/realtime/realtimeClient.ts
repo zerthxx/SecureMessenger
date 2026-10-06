@@ -9,6 +9,13 @@ export type RealtimeMessage = ClientMessage;
 export type RealtimeStatus = 'offline' | 'connecting' | 'online';
 
 const PING_INTERVAL_MS = 20_000;
+/**
+ * A socket not open after this long is dropped and retried. React Native's
+ * WebSocket (OkHttp, WebSocketModule) bounds only the TCP connect, not the
+ * upgrade response, so a handshake that is never answered used to leave the
+ * socket "connecting" — and realtime (calls, chat hints) dead — for good.
+ */
+const CONNECT_TIMEOUT_MS = 15_000;
 const MAX_BACKOFF_MS = 30_000;
 const MAX_QUEUED_MESSAGES = 100;
 /** A token expiring within this window is refreshed before connecting instead of being rejected by the server. */
@@ -67,6 +74,11 @@ class RealtimeClient {
   private attempts = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Nothing has arrived since the last ping was sent. */
+  private awaitingPong = false;
+  /** Abandoned sockets not closed yet (see abandon). */
+  private strays = 0;
 
   getStatus = (): RealtimeStatus => this.status;
 
@@ -80,6 +92,7 @@ class RealtimeClient {
   stop(): void {
     this.wanted = false;
     this.clearRetry();
+    this.clearConnectTimer();
     this.stopPing();
     this.queue.length = 0;
     const socket = this.socket;
@@ -152,9 +165,15 @@ class RealtimeClient {
       return;
     }
     this.socket = socket;
+    this.clearConnectTimer();
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null;
+      if (this.socket === socket && this.status !== 'online') this.abandon(socket);
+    }, CONNECT_TIMEOUT_MS);
 
     socket.onopen = () => {
       if (this.socket !== socket) return;
+      this.clearConnectTimer();
       this.attempts = 0;
       this.setStatus('online');
       this.startPing();
@@ -163,6 +182,7 @@ class RealtimeClient {
 
     socket.onmessage = (event) => {
       if (this.socket !== socket || typeof event.data !== 'string') return;
+      this.awaitingPong = false;
       let parsed: RealtimeEvent;
       try {
         parsed = JSON.parse(event.data) as RealtimeEvent;
@@ -184,11 +204,16 @@ class RealtimeClient {
     socket.onclose = (event) => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.clearConnectTimer();
       this.stopPing();
       this.setStatus('offline');
       if (!this.wanted) return;
       if (event.code === CLOSE_REPLACED) {
-        // A newer connection from this same device took over; don't fight it.
+        // A newer connection from this same device took over; don't fight it
+        // — unless that newer connection may be one of our own abandoned
+        // sockets finishing its handshake late (it closes itself on open, see
+        // abandon), which would otherwise leave this device with none.
+        if (this.strays > 0) this.scheduleRetry();
         return;
       }
       if (event.code === CLOSE_SESSION_REVOKED) {
@@ -227,10 +252,66 @@ class RealtimeClient {
     }
   }
 
+  /**
+   * Gives up on a socket that is stuck connecting or has gone silent, and
+   * reconnects. React Native ignores close() on a socket that is still
+   * connecting, so an abandoned handshake can still complete later — and the
+   * server then closes our current connection as replaced by it. Until its
+   * own onclose, such a socket counts as a stray: it shuts itself as soon as
+   * it opens, and a "replaced" close meanwhile reconnects (see onclose).
+   */
+  private abandon(socket: WebSocket): void {
+    if (this.socket !== socket) return;
+    this.socket = null;
+    this.clearConnectTimer();
+    this.stopPing();
+    this.strays += 1;
+    socket.onmessage = null;
+    socket.onopen = () => {
+      try {
+        socket.close(1000, 'abandoned');
+      } catch {
+        // already closing
+      }
+    };
+    socket.onclose = () => {
+      this.strays -= 1;
+    };
+    try {
+      socket.close();
+    } catch {
+      // already closing
+    }
+    this.setStatus('offline');
+    this.scheduleRetry();
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+  }
+
+  /**
+   * Pings every PING_INTERVAL_MS; the server answers each with a pong. A
+   * connection that delivers nothing between two pings is dead without
+   * having been closed (a network switch, a NAT that dropped the flow) — it
+   * is replaced, instead of showing "online" while calls and chat hints
+   * silently go nowhere.
+   */
   private startPing(): void {
     this.stopPing();
+    this.awaitingPong = false;
     this.pingTimer = setInterval(() => {
-      if (this.socket && this.status === 'online') this.socket.send(JSON.stringify({ type: 'ping' }));
+      const socket = this.socket;
+      if (!socket || this.status !== 'online') return;
+      if (this.awaitingPong) {
+        this.abandon(socket);
+        return;
+      }
+      this.awaitingPong = true;
+      socket.send(JSON.stringify({ type: 'ping' }));
     }, PING_INTERVAL_MS);
   }
 

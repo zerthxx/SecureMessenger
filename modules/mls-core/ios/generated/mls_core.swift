@@ -1059,6 +1059,31 @@ fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
     typealias SwiftType = [Data]
 
@@ -1079,6 +1104,16 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
         }
         return seq
     }
+}
+/**
+ * The app has stored these decrypted messages; their kept plaintext is dropped.
+ */
+public func ackDecrypted(messageIds: [String])throws   {try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_ack_decrypted(
+        FfiConverterSequenceString.lower(messageIds),uniffiCallStatus
+    )
+}
 }
 /**
  * Adds a peer device (identified by its public KeyPackage bytes,
@@ -1121,6 +1156,21 @@ public func decryptMessage(groupId: Data, ciphertext: Data)throws  -> String  {
         uniffiCallStatus in
     uniffi_mls_core_fn_func_decrypt_message(
         FfiConverterData.lower(groupId),
+        FfiConverterData.lower(ciphertext),uniffiCallStatus
+    )
+})
+}
+/**
+ * Crash-safe [`decrypt_message`] for the server row `message_id` — see
+ * group.rs `decrypt_message_once`. The app calls [`ack_decrypted`] once it
+ * has stored the result.
+ */
+public func decryptMessageOnce(groupId: Data, messageId: String, ciphertext: Data)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_decrypt_message_once(
+        FfiConverterData.lower(groupId),
+        FfiConverterString.lower(messageId),
         FfiConverterData.lower(ciphertext),uniffiCallStatus
     )
 })
@@ -1301,6 +1351,16 @@ public func openCallSignal(groupId: Data, callId: String, sealed: Data)throws  -
 })
 }
 /**
+ * Message ids decrypted but not yet acknowledged (see [`decrypt_message_once`]).
+ */
+public func pendingDecryptedIds()throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_pending_decrypted_ids(uniffiCallStatus
+    )
+})
+}
+/**
  * (Re)creates this device's copy of `group_id` with every device behind
  * `key_packages` added in one commit — see group.rs's `rebuild_group`.
  * Replaces `create_group` + repeated `add_member_to_group` for starting a
@@ -1350,6 +1410,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_mls_core_checksum_func_ack_decrypted() != 21891) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mls_core_checksum_func_add_member_to_group() != 24667) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1357,6 +1420,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mls_core_checksum_func_decrypt_message() != 3788) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_decrypt_message_once() != 47628) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mls_core_checksum_func_delete_group() != 22383) {
@@ -1390,6 +1456,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_pending_decrypted_ids() != 51710) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mls_core_checksum_func_rebuild_group() != 44606) {

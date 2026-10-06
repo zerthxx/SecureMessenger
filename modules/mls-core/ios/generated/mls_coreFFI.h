@@ -243,6 +243,11 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ACK_DECRYPTED
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ACK_DECRYPTED
+void uniffi_mls_core_fn_func_ack_decrypted(RustBuffer message_ids, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ADD_MEMBER_TO_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_ADD_MEMBER_TO_GROUP
 RustBuffer uniffi_mls_core_fn_func_add_member_to_group(RustBuffer group_id, RustBuffer key_package_bytes, RustCallStatus *_Nonnull out_status
@@ -256,6 +261,11 @@ void uniffi_mls_core_fn_func_create_group(RustBuffer group_id, RustCallStatus *_
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DECRYPT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DECRYPT_MESSAGE
 RustBuffer uniffi_mls_core_fn_func_decrypt_message(RustBuffer group_id, RustBuffer ciphertext, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DECRYPT_MESSAGE_ONCE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DECRYPT_MESSAGE_ONCE
+RustBuffer uniffi_mls_core_fn_func_decrypt_message_once(RustBuffer group_id, RustBuffer message_id, RustBuffer ciphertext, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_DELETE_GROUP
@@ -314,6 +324,12 @@ RustBuffer uniffi_mls_core_fn_func_join_group_replacing(RustBuffer welcome_bytes
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_OPEN_CALL_SIGNAL
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_OPEN_CALL_SIGNAL
 RustBuffer uniffi_mls_core_fn_func_open_call_signal(RustBuffer group_id, RustBuffer call_id, RustBuffer sealed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_PENDING_DECRYPTED_IDS
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_PENDING_DECRYPTED_IDS
+RustBuffer uniffi_mls_core_fn_func_pending_decrypted_ids(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_FN_FUNC_REBUILD_GROUP
@@ -586,6 +602,12 @@ void ffi_mls_core_rust_future_free_void(uint64_t handle
 void ffi_mls_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ACK_DECRYPTED
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ACK_DECRYPTED
+uint16_t uniffi_mls_core_checksum_func_ack_decrypted(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ADD_MEMBER_TO_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_ADD_MEMBER_TO_GROUP
 uint16_t uniffi_mls_core_checksum_func_add_member_to_group(void
@@ -601,6 +623,12 @@ uint16_t uniffi_mls_core_checksum_func_create_group(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DECRYPT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DECRYPT_MESSAGE
 uint16_t uniffi_mls_core_checksum_func_decrypt_message(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DECRYPT_MESSAGE_ONCE
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_DECRYPT_MESSAGE_ONCE
+uint16_t uniffi_mls_core_checksum_func_decrypt_message_once(void
     
 );
 #endif
@@ -667,6 +695,12 @@ uint16_t uniffi_mls_core_checksum_func_join_group_replacing(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_OPEN_CALL_SIGNAL
 #define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_OPEN_CALL_SIGNAL
 uint16_t uniffi_mls_core_checksum_func_open_call_signal(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_PENDING_DECRYPTED_IDS
+#define UNIFFI_FFIDEF_UNIFFI_MLS_CORE_CHECKSUM_FUNC_PENDING_DECRYPTED_IDS
+uint16_t uniffi_mls_core_checksum_func_pending_decrypted_ids(void
     
 );
 #endif

@@ -95,6 +95,25 @@ async function assertMember(ctx: Pick<Context, 'db'> & { user: { id: string } },
 }
 
 /**
+ * Whether the caller may address `targetUserId`'s devices (list them, use up
+ * their KeyPackages): its own, or those of someone it shares a conversation
+ * with — createConversation always comes before adding anyone to a group.
+ * A stranger has no use for either; only an attacker draining or mapping
+ * someone's devices would.
+ */
+async function sharesConversationOrSelf(ctx: Pick<Context, 'db'> & { user: { id: string } }, targetUserId: string): Promise<boolean> {
+  if (targetUserId === ctx.user.id) return true;
+  const target = alias(conversationMembers, 'target_member');
+  const [shared] = await ctx.db
+    .select({ conversationId: conversationMembers.conversationId })
+    .from(conversationMembers)
+    .innerJoin(target, and(eq(target.conversationId, conversationMembers.conversationId), eq(target.userId, targetUserId)))
+    .where(eq(conversationMembers.userId, ctx.user.id))
+    .limit(1);
+  return !!shared;
+}
+
+/**
  * `sinceCreatedAt` makes a fetch incremental: only rows created at or after
  * that instant. Clients send their newest already-processed row's timestamp
  * minus an overlap window and skip ids they already hold, so a row whose
@@ -102,9 +121,33 @@ async function assertMember(ctx: Pick<Context, 'db'> & { user: { id: string } },
  * Omitted, the full history is returned — what app versions from before
  * incremental sync still request.
  */
+/** Most rows one paged fetchMessages call returns. */
+export const MAX_PAGE_ROWS = 500;
+/**
+ * Most rows a fetchMessages call without `page` returns (app versions from
+ * before paging). It used to have no limit, so one call on a long
+ * conversation read, encoded and sent its entire history. Ascending order
+ * keeps it safe for those versions: they move their sync cursor to the
+ * newest row they got, so the next sync carries on from there.
+ */
+export const LEGACY_MAX_ROWS = 5000;
+/** `<created_at in UTC with microseconds>_<id>` — exact, unlike the millisecond `createdAt`. */
+const PAGE_CURSOR_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+const rowCursor = sql<string>`to_char(${messages.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || '_' || ${messages.id}::text`;
+
 const fetchMessagesInput = z.object({
   conversationId: z.string().uuid(),
   sinceCreatedAt: z.string().datetime({ offset: true }).optional(),
+  /**
+   * Opt-in paging (see fetchMessages). `after` is the `cursor` of the last
+   * in-page row of the previous page; the first page of a sync omits it.
+   */
+  page: z
+    .object({
+      limit: z.number().int().min(1).max(MAX_PAGE_ROWS),
+      after: z.string().regex(PAGE_CURSOR_RE).optional(),
+    })
+    .optional(),
 });
 
 export const e2eeRouter = router({
@@ -208,6 +251,14 @@ export const e2eeRouter = router({
       // exhaustion against a target device.
       enforceRateLimit(`e2ee:consumeKeyPackage:device:${ctx.device.id}`, 30, 5 * 60 * 1000);
       await assertCallerDeviceActive(ctx);
+
+      // Only a device the caller could legitimately add to a group (see
+      // sharesConversationOrSelf). Answered like "none left", so it doesn't
+      // reveal whether the device exists.
+      const [target] = await ctx.db.select({ userId: devices.userId }).from(devices).where(eq(devices.id, input.targetDeviceId)).limit(1);
+      if (!target || !(await sharesConversationOrSelf(ctx, target.userId))) {
+        return { keyPackage: null };
+      }
 
       // Audit fix: this was previously a SELECT then a separate DELETE.
       // Two concurrent consumeKeyPackage calls for the same
@@ -423,6 +474,44 @@ export const e2eeRouter = router({
       if (input.messageType === 'welcome' && !input.recipientDeviceId) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'recipientDeviceId is required for welcome messages.' });
       }
+      if (input.messageType === 'application' && input.recipientDeviceId) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Application messages are not addressed to a device.' });
+      }
+      if (input.messageType === 'welcome') {
+        // A group generation comes into existence only through resetGroup,
+        // which serializes it. A Welcome sent here could otherwise claim a
+        // generation and be joined instead of the one resetGroup accepted —
+        // one member diverting the other's devices into a group of its own
+        // making. Only app versions from before generations still send
+        // Welcomes this way, and only for a conversation still on its first
+        // group; those are stored without a generation (read as 1).
+        if (input.mlsGeneration !== undefined) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Group Welcomes are sent with resetGroup.' });
+        }
+        const [conversation] = await ctx.db
+          .select({ mlsGeneration: conversations.mlsGeneration })
+          .from(conversations)
+          .where(eq(conversations.id, input.conversationId))
+          .limit(1);
+        if (!conversation || conversation.mlsGeneration > 1) {
+          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: UPDATE_REQUIRED });
+        }
+        const [recipient] = await ctx.db
+          .select({ id: devices.id })
+          .from(devices)
+          .innerJoin(conversationMembers, eq(conversationMembers.userId, devices.userId))
+          .where(
+            and(
+              eq(conversationMembers.conversationId, input.conversationId),
+              eq(devices.id, input.recipientDeviceId!),
+              isAddressableDevice(new Date()),
+            ),
+          )
+          .limit(1);
+        if (!recipient) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'The recipient must be an active device of a conversation member.' });
+        }
+      }
 
       // FOR SHARE: concurrent sends don't wait for each other, but resetGroup
       // (FOR UPDATE) can't move the generation between this check and the
@@ -536,28 +625,65 @@ export const e2eeRouter = router({
       throw new TRPCError({ code: 'FORBIDDEN', message: 'Not a member of this conversation.' });
     }
 
+    const visible = or(isNull(messages.recipientDeviceId), eq(messages.recipientDeviceId, ctx.device.id));
+    const since = input.sinceCreatedAt ? gte(messages.createdAt, new Date(input.sinceCreatedAt)) : undefined;
+    const after = input.page?.after ? PAGE_CURSOR_RE.exec(input.page.after) : null;
+    // The plain `>=` is redundant with the row comparison but lets the
+    // (conversation_id, created_at) index start the scan at the page.
+    const afterCondition = after
+      ? and(
+          gte(messages.createdAt, sql`${after[1]}::timestamptz`),
+          sql`(${messages.createdAt}, ${messages.id}) > (${after[1]}::timestamptz, ${after[2]}::uuid)`,
+        )
+      : undefined;
+    const limit = input.page?.limit ?? LEGACY_MAX_ROWS;
+    const columns = {
+      id: messages.id,
+      senderDeviceId: messages.senderDeviceId,
+      senderUserId: devices.userId,
+      messageType: messages.messageType,
+      ciphertext: messages.ciphertext,
+      mlsGeneration: messages.mlsGeneration,
+      createdAt: messages.createdAt,
+      cursor: rowCursor,
+    };
+
     const rows = await ctx.db
-      .select({
-        id: messages.id,
-        senderDeviceId: messages.senderDeviceId,
-        senderUserId: devices.userId,
-        messageType: messages.messageType,
-        ciphertext: messages.ciphertext,
-        mlsGeneration: messages.mlsGeneration,
-        createdAt: messages.createdAt,
-      })
+      .select(columns)
       .from(messages)
       .innerJoin(devices, eq(devices.id, messages.senderDeviceId))
-      .where(
-        and(
-          eq(messages.conversationId, input.conversationId),
-          or(isNull(messages.recipientDeviceId), eq(messages.recipientDeviceId, ctx.device.id)),
-          input.sinceCreatedAt ? gte(messages.createdAt, new Date(input.sinceCreatedAt)) : undefined,
-        ),
-      )
-      .orderBy(asc(messages.createdAt));
+      .where(and(eq(messages.conversationId, input.conversationId), visible, since, afterCondition))
+      .orderBy(asc(messages.createdAt), asc(messages.id))
+      .limit(limit);
 
-    return rows.map((row) => ({
+    // A full page leaves newer rows for later pages, and with them perhaps
+    // the newest Welcome addressed to this device. Without that Welcome the
+    // device would take older-generation messages for a group it isn't in
+    // and rebuild the conversation's group needlessly (see groupSync's
+    // planRow) — so its Welcomes past the page always come along, marked
+    // `outOfPage`: a device has one per generation, so they stay few. Paged
+    // callers only; older app versions would take their timestamps as their
+    // sync position and skip the rows in between.
+    const lastPosition = rows.length === limit ? PAGE_CURSOR_RE.exec(rows[rows.length - 1]?.cursor ?? '') : null;
+    const laterWelcomes =
+      input.page && lastPosition
+        ? await ctx.db
+            .select(columns)
+            .from(messages)
+            .innerJoin(devices, eq(devices.id, messages.senderDeviceId))
+            .where(
+              and(
+                eq(messages.conversationId, input.conversationId),
+                eq(messages.messageType, 'welcome'),
+                eq(messages.recipientDeviceId, ctx.device.id),
+                gte(messages.createdAt, sql`${lastPosition[1]}::timestamptz`),
+                sql`(${messages.createdAt}, ${messages.id}) > (${lastPosition[1]}::timestamptz, ${lastPosition[2]}::uuid)`,
+              ),
+            )
+            .orderBy(asc(messages.createdAt), asc(messages.id))
+        : [];
+
+    const toWire = (row: (typeof rows)[number], outOfPage: boolean) => ({
       id: row.id,
       senderDeviceId: row.senderDeviceId,
       // Lets a device tell its own account's other devices' messages apart
@@ -568,7 +694,11 @@ export const e2eeRouter = router({
       // Rows written before generations existed all belong to generation 1.
       mlsGeneration: row.mlsGeneration ?? 1,
       createdAt: row.createdAt.toISOString(),
-    }));
+      // Exact position for the next page's `after`.
+      cursor: row.cursor,
+      ...(outOfPage ? { outOfPage: true as const } : {}),
+    });
+    return [...rows.map((row) => toWire(row, false)), ...laterWelcomes.map((row) => toWire(row, true))];
   }),
 
   /**
@@ -595,6 +725,9 @@ export const e2eeRouter = router({
     // (which may look up several users in a row) while blunting scripted
     // enumeration of many users' device lists.
     enforceRateLimit(`e2ee:listActiveDeviceIds:device:${ctx.device.id}`, 60, 5 * 60 * 1000);
+    // Only for oneself or a conversation partner (app versions from before
+    // listConversationDevices use it right after createConversation).
+    if (!(await sharesConversationOrSelf(ctx, input.userId))) return [];
 
     const rows = await ctx.db
       .select({ id: devices.id })

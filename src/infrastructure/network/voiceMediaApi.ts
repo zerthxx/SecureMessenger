@@ -7,6 +7,9 @@
 import { authorizedFetch } from './authorizedFetch';
 import { API_BASE_URL } from './trpcClient';
 
+/** A voice clip's ciphertext is up to a few hundred KB; past this a slow or dead connection counts as failed instead of hanging (see fetchWithTimeout). */
+const VOICE_TRANSFER_TIMEOUT_MS = 120_000;
+
 export async function uploadVoiceBlob(conversationId: string, bytes: Uint8Array): Promise<{ mediaId: string }> {
   const response = await authorizedFetch(`${API_BASE_URL}/media/${conversationId}`, {
     method: 'POST',
@@ -15,7 +18,7 @@ export async function uploadVoiceBlob(conversationId: string, bytes: Uint8Array)
     // only the DOM `BodyInit` type (written for browsers) doesn't list
     // it, so this is a lib-typing gap, not a runtime concern.
     body: bytes as unknown as BodyInit,
-  });
+  }, VOICE_TRANSFER_TIMEOUT_MS);
   if (!response.ok) {
     throw new Error(`Voice message upload failed (${response.status}).`);
   }
@@ -24,7 +27,7 @@ export async function uploadVoiceBlob(conversationId: string, bytes: Uint8Array)
 }
 
 export async function downloadVoiceBlob(conversationId: string, mediaId: string): Promise<Uint8Array> {
-  const response = await authorizedFetch(`${API_BASE_URL}/media/${conversationId}/${mediaId}`, { method: 'GET' });
+  const response = await authorizedFetch(`${API_BASE_URL}/media/${conversationId}/${mediaId}`, { method: 'GET' }, VOICE_TRANSFER_TIMEOUT_MS);
   if (!response.ok) {
     throw new Error(`Voice message download failed (${response.status}).`);
   }

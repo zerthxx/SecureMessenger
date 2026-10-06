@@ -48,6 +48,8 @@ export interface CallState {
 const RECONNECT_AFTER_MS = 3_000;
 /** A call that hasn't (re)connected within this long is ended. */
 const GIVE_UP_AFTER_MS = 30_000;
+/** A call still ringing after this long ended without this device hearing about it (the server stops ringing after 45 s). */
+const RING_TIMEOUT_MS = 60_000;
 
 class PermissionDeniedError extends Error {}
 
@@ -107,6 +109,7 @@ export class CallSession {
   private receiving: Promise<void> = Promise.resolve();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private giveUpTimer: ReturnType<typeof setTimeout> | null = null;
+  private ringTimer: ReturnType<typeof setTimeout> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private backgrounded = false;
   private finished = false;
@@ -142,6 +145,7 @@ export class CallSession {
       phase: 'incoming',
     });
     session.remoteOfferSdp = input.offerSdp;
+    session.armRingTimeout();
     return session;
   }
 
@@ -183,6 +187,7 @@ export class CallSession {
           payload,
         });
       });
+      this.armRingTimeout();
       await pc.setLocalDescription(offer);
       await CallSessionNative.startAudio(this.state.speakerOn);
     } catch (err) {
@@ -212,6 +217,7 @@ export class CallSession {
         realtime.send({ type: 'call.accept', callId: this.state.callId, payload });
       });
       await pc.setLocalDescription(answer);
+      this.armGiveUp();
       await CallSessionNative.startAudio(this.state.speakerOn);
     } catch (err) {
       this.end(err instanceof PermissionDeniedError ? 'permission_denied' : 'failed', true);
@@ -302,6 +308,7 @@ export class CallSession {
     this.remoteDescriptionSet = true;
     await this.addHeldCandidates();
     if (this.state.phase === 'outgoing') this.update({ phase: 'connecting' });
+    this.armGiveUp();
   }
 
   private async onSignal(payload: string): Promise<void> {
@@ -500,11 +507,26 @@ export class CallSession {
     }, 5000);
   }
 
+  /**
+   * Safety net for a ringing call whose end this device never heard about —
+   * e.g. Android froze the app in the background and the server's heartbeat
+   * dropped its socket just as the call ended. Without it the stale call
+   * keeps its screen up and turns every later call away as busy.
+   */
+  private armRingTimeout(): void {
+    this.ringTimer = setTimeout(() => {
+      this.ringTimer = null;
+      if (this.state.phase === 'incoming') this.end('missed', true);
+      else if (this.state.phase === 'outgoing') this.end('no_answer', true);
+    }, RING_TIMEOUT_MS);
+  }
+
+  /** Ends the call unless it (re)connects in time: armed once the offer and answer are exchanged, and whenever the connection drops. */
   private armGiveUp(): void {
-    if (this.giveUpTimer) return;
+    if (this.giveUpTimer || this.finished) return;
     this.giveUpTimer = setTimeout(() => {
       this.giveUpTimer = null;
-      if (this.state.phase !== 'connected') this.end('connection_lost', true);
+      if (this.state.phase !== 'connected') this.end(this.state.connectedAt === null ? 'failed' : 'connection_lost', true);
     }, GIVE_UP_AFTER_MS);
   }
 
@@ -557,6 +579,8 @@ export class CallSession {
     this.finished = true;
     if (notifyServer) realtime.send({ type: 'call.hangup', callId: this.state.callId });
     this.clearReconnectTimers();
+    if (this.ringTimer) clearTimeout(this.ringTimer);
+    this.ringTimer = null;
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
     try {

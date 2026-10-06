@@ -107,6 +107,31 @@ export async function decryptMessage(owner: string, groupId: Uint8Array, ciphert
 }
 
 /**
+ * Decrypts server row `rowId` so that a crash before the result is stored
+ * loses nothing: decrypting the same row again returns the same plaintext
+ * (MLS itself would refuse it, the key being already used). Call
+ * `ackDecrypted` once the result is stored. See rust/src/group.rs
+ * `decrypt_message_once`.
+ */
+export async function decryptMessageOnce(owner: string, groupId: Uint8Array, rowId: string, ciphertext: Uint8Array): Promise<string> {
+  assertOpenFor(owner);
+  return MlsCoreModuleNative.decryptMessageOnce(groupId, rowId, ciphertext);
+}
+
+/** These rows' results are stored; the native side forgets their plaintext. */
+export async function ackDecrypted(owner: string, rowIds: string[]): Promise<void> {
+  if (rowIds.length === 0) return;
+  assertOpenFor(owner);
+  await MlsCoreModuleNative.ackDecrypted(rowIds);
+}
+
+/** Rows decrypted but never acknowledged — what a crash left behind. */
+export async function pendingDecryptedIds(owner: string): Promise<string[]> {
+  assertOpenFor(owner);
+  return MlsCoreModuleNative.pendingDecryptedIds();
+}
+
+/**
  * Seals call signaling (an SDP offer/answer or ICE candidate) for the other
  * member of a 1:1 conversation, with a key derived from the conversation's
  * MLS group for this call (the MLS exporter). The server relaying it can't

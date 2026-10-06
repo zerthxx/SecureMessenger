@@ -85,7 +85,7 @@ export function ProfileScreen(): React.JSX.Element {
 
       <Card padded={false} style={styles.menuCard}>
         <View style={styles.rowPadding}>
-          <ListRow icon="help-circle-outline" label="Help & feedback" onPress={() => router.push('/settings/help')} />
+          <ListRow icon="help-circle-outline" label="Help" onPress={() => router.push('/settings/help')} />
         </View>
         <Divider inset={60} />
         <View style={styles.rowPadding}>

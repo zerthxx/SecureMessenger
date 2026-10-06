@@ -21,6 +21,16 @@ declare class MlsCoreModule extends NativeModule<{}> {
   groupMemberSignatureKeys(groupId: Uint8Array): Promise<Uint8Array[]>;
   encryptMessage(groupId: Uint8Array, plaintext: string): Promise<Uint8Array>;
   decryptMessage(groupId: Uint8Array, ciphertext: Uint8Array): Promise<string>;
+  /**
+   * Crash-safe decrypt of server row `messageId`: the same row decrypted again
+   * (the app was killed before storing it) returns the same plaintext. See
+   * rust/src/group.rs `decrypt_message_once`; acknowledge with `ackDecrypted`.
+   */
+  decryptMessageOnce(groupId: Uint8Array, messageId: string, ciphertext: Uint8Array): Promise<string>;
+  /** The app has stored these rows; their kept plaintext is dropped. */
+  ackDecrypted(messageIds: string[]): Promise<void>;
+  /** Rows decrypted but not yet acknowledged. */
+  pendingDecryptedIds(): Promise<string[]>;
   /** Seals call signaling for the other member(s) of the group, keyed per call via the MLS exporter. Read-only on group state. */
   sealCallSignal(groupId: Uint8Array, callId: string, plaintext: string): Promise<Uint8Array>;
   /** Opens call signaling sealed by another group member; rejects anything tampered with or sealed for another call, group, or epoch. */

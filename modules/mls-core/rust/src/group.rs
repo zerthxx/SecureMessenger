@@ -305,6 +305,53 @@ pub fn encrypt_message(
     out.tls_serialize_detached().map_err(|_| MlsCoreError::GroupOperationFailed)
 }
 
+/// Crash-safe receive: `decrypt_message` for the server row `message_id`,
+/// except that a row already decrypted — whose key MLS has therefore already
+/// erased — returns the same plaintext again instead of failing.
+///
+/// The plaintext is recorded with the row id and the ciphertext's hash in the
+/// same storage write (checkpoint) as the ratchet step that consumed the key,
+/// and stays until the app confirms it has stored the message
+/// (`ack_decrypted`). Before, an app killed between the two lost the message
+/// for good: on restart MLS refused it as already decrypted.
+///
+/// Nothing about MLS changes: the key is consumed and erased exactly as by
+/// `decrypt_message`. Only the identical bytes under the same id get the
+/// stored answer; anything else goes through MLS, so a replay under another
+/// id is still refused as a duplicate.
+pub fn decrypt_message_once(
+    provider: &GroupProvider,
+    group_id_bytes: &[u8],
+    message_id: &str,
+    ciphertext_bytes: &[u8],
+) -> Result<String, MlsCoreError> {
+    if message_id.is_empty() {
+        return Err(MlsCoreError::InvalidInput);
+    }
+    let digest = provider
+        .crypto()
+        .hash(HashType::Sha2_256, ciphertext_bytes)
+        .map_err(|_| MlsCoreError::GroupOperationFailed)?;
+    if let Some((stored_digest, plaintext)) = provider.pending_plaintext(message_id).map_err(|_| MlsCoreError::Storage)? {
+        return if stored_digest == digest { Ok(plaintext) } else { Err(MlsCoreError::InvalidCiphertext) };
+    }
+    let plaintext = decrypt_message(provider, group_id_bytes, ciphertext_bytes)?;
+    provider
+        .put_pending_plaintext(message_id, &digest, &plaintext)
+        .map_err(|_| MlsCoreError::Storage)?;
+    Ok(plaintext)
+}
+
+/// The app has stored these messages: forget their plaintext (see `decrypt_message_once`).
+pub fn ack_decrypted(provider: &GroupProvider, message_ids: &[String]) -> Result<(), MlsCoreError> {
+    provider.delete_pending_plaintext(message_ids).map_err(|_| MlsCoreError::Storage)
+}
+
+/// Rows decrypted but not yet acknowledged — after a crash, the app checks which of them it already stored.
+pub fn pending_decrypted_ids(provider: &GroupProvider) -> Result<Vec<String>, MlsCoreError> {
+    provider.pending_plaintext_ids().map_err(|_| MlsCoreError::Storage)
+}
+
 /// Decrypts and authenticates an application message ciphertext.
 /// Returns `MlsCoreError::InvalidCiphertext` for anything that fails MLS's
 /// own AEAD/membership authentication — tampered bytes, wrong group,

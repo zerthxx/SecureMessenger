@@ -10,7 +10,10 @@ import uniffi.mls_core.IdentityKeyInfo
 import uniffi.mls_core.MlsCoreException
 import uniffi.mls_core.addMemberToGroup
 import uniffi.mls_core.createGroup
+import uniffi.mls_core.ackDecrypted
 import uniffi.mls_core.decryptMessage
+import uniffi.mls_core.decryptMessageOnce
+import uniffi.mls_core.pendingDecryptedIds
 import uniffi.mls_core.deleteGroup
 import uniffi.mls_core.groupMemberSignatureKeys
 import uniffi.mls_core.joinGroupReplacing
@@ -341,6 +344,34 @@ class MlsCoreModule : Module() {
       requireInitialized()
       try {
         decryptMessage(groupId, ciphertext)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    // Crash-safe receive — see rust/src/group.rs `decrypt_message_once`.
+    AsyncFunction("decryptMessageOnce") { groupId: ByteArray, messageId: String, ciphertext: ByteArray ->
+      requireInitialized()
+      try {
+        decryptMessageOnce(groupId, messageId, ciphertext)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    AsyncFunction("ackDecrypted") { messageIds: List<String> ->
+      requireInitialized()
+      try {
+        ackDecrypted(messageIds)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    AsyncFunction("pendingDecryptedIds") {
+      requireInitialized()
+      try {
+        pendingDecryptedIds()
       } catch (e: MlsCoreException) {
         throw MlsCoreRuntimeError(e)
       }

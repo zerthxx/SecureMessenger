@@ -301,4 +301,66 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
     await m.db.pool.query(`insert into device_key_packages(device_id, public_key_package) values ($1, $2)`, [B_EXPIRED, Buffer.from('kp')]);
     assert.deepEqual(await as(ALICE, A1).consumeKeyPackage({ targetDeviceId: B_EXPIRED }), { keyPackage: null });
   });
+
+  test('a Welcome claiming a generation is refused — generations only come from resetGroup', async () => {
+    await as(ALICE, A1).resetGroup({ conversationId, expectedGeneration: 0, welcome: WELCOME, recipientDeviceIds: [B1] });
+    // Bob tries to plant a Welcome for the current generation (or a newer
+    // one) that Alice's other device would join instead of the real one.
+    for (const mlsGeneration of [1, 2, 99]) {
+      await assert.rejects(
+        as(BOB, B1).sendMessage({ conversationId, ciphertext: ct(), messageType: 'welcome', recipientDeviceId: A2, mlsGeneration }),
+        trpcError('BAD_REQUEST'),
+      );
+    }
+    const forA2 = await as(ALICE, A2).fetchMessages({ conversationId });
+    assert.equal(forA2.filter((r) => r.messageType === 'welcome').length, 0);
+  });
+
+  test('older app versions can still send their Welcome while the conversation is on its first group', async () => {
+    await as(ALICE, A1).sendMessage({ conversationId, ciphertext: ct(), messageType: 'welcome', recipientDeviceId: B1 });
+    const [welcome] = (await as(BOB, B1).fetchMessages({ conversationId })).filter((r) => r.messageType === 'welcome');
+    assert.equal(welcome?.mlsGeneration, 1, 'stored without a generation, so it can never pass for a newer one');
+  });
+
+  test('a legacy Welcome is refused once the conversation has moved past its first group', async () => {
+    await as(ALICE, A1).resetGroup({ conversationId, expectedGeneration: 0, welcome: WELCOME, recipientDeviceIds: [B1] });
+    await as(BOB, B1).resetGroup({ conversationId, expectedGeneration: 1, welcome: WELCOME, recipientDeviceIds: [A1] });
+    await assert.rejects(
+      as(ALICE, A1).sendMessage({ conversationId, ciphertext: ct(), messageType: 'welcome', recipientDeviceId: B1 }),
+      trpcError('PRECONDITION_FAILED'),
+    );
+  });
+
+  test("a Welcome is only for an active device of a member, and an application message isn't addressed at all", async () => {
+    for (const recipientDeviceId of [M1, B_REVOKED, B_NO_E2EE]) {
+      await assert.rejects(
+        as(ALICE, A1).sendMessage({ conversationId, ciphertext: ct(), messageType: 'welcome', recipientDeviceId }),
+        trpcError('BAD_REQUEST'),
+      );
+    }
+    await assert.rejects(
+      as(ALICE, A1).sendMessage({ conversationId, ciphertext: ct(), messageType: 'application', recipientDeviceId: B1 }),
+      trpcError('BAD_REQUEST'),
+    );
+  });
+
+  test("only devices one could add to a group can have their KeyPackages consumed: one's own, or a conversation partner's", async () => {
+    const kp = (device: string, n: number) =>
+      m.db.pool.query(`insert into device_key_packages(device_id, public_key_package) select $1, convert_to('kp-' || g, 'UTF8') from generate_series(1, $2) g`, [device, n]);
+    await kp(B1, 3);
+    await kp(A2, 1);
+    // Mallory shares no conversation with Bob: she can't drain his device.
+    assert.deepEqual(await as(MALLORY, M1).consumeKeyPackage({ targetDeviceId: B1 }), { keyPackage: null });
+    // Alice can (they share a conversation), and so can Alice for her own other device.
+    assert.notEqual((await as(ALICE, A1).consumeKeyPackage({ targetDeviceId: B1 })).keyPackage, null);
+    assert.notEqual((await as(ALICE, A1).consumeKeyPackage({ targetDeviceId: A2 })).keyPackage, null);
+    const { rows } = await m.db.pool.query(`select count(*)::int as n from device_key_packages where device_id = $1`, [B1]);
+    assert.equal(rows[0].n, 2, "Mallory's attempt used none of Bob's");
+  });
+
+  test("a user's device list is only for that user and their conversation partners", async () => {
+    assert.deepEqual(await as(MALLORY, M1).listActiveDeviceIds({ userId: BOB }), []);
+    assert.ok((await as(ALICE, A1).listActiveDeviceIds({ userId: BOB })).includes(B1));
+    assert.ok((await as(BOB, B1).listActiveDeviceIds({ userId: BOB })).includes(B1));
+  });
 });

@@ -1,8 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
 
+import { randomUuid } from '@/core/utils/randomUuid';
 import type { AuthUser, OwnProfile, ProfileUpdate } from '@/domain/entities';
 import { deleteAvatar, uploadAvatar as uploadAvatarBytes } from '@/infrastructure/network/avatarApi';
 import { getDeviceInfo, getDeviceMetadata } from '@/infrastructure/network/deviceInfo';
+import { endSessionOnServer, retryPendingSignOuts } from '@/infrastructure/network/pendingSignOuts';
 import {
   authApi,
   getApiErrorMessage,
@@ -131,9 +133,14 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
   // `status` still reads 'authenticated' from the other call.
   const bootstrappedRef = useRef(false);
 
+  /** The sign-up being attempted and its request id (see register). */
+  const registrationAttemptRef = useRef<{ key: string; id: string } | null>(null);
+
   useEffect(() => {
     if (bootstrappedRef.current) return;
     bootstrappedRef.current = true;
+    // Sign-outs the server couldn't be told about last time.
+    void retryPendingSignOuts();
     (async () => {
       const stored = await loadSession();
       if (!stored) {
@@ -266,12 +273,21 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
       },
 
       async register({ username, displayName, password }) {
+        // The same id for every retry of this sign-up, so one whose response
+        // was lost gets its account (and recovery code) back instead of
+        // "username already taken" (see the server's registrationReplay.ts).
+        const attemptKey = JSON.stringify([username, displayName, password]);
+        if (registrationAttemptRef.current?.key !== attemptKey) {
+          registrationAttemptRef.current = { key: attemptKey, id: randomUuid() };
+        }
         const result = await authApi.register({
           username,
           displayName,
           password,
           device: getDeviceInfo(),
+          registrationId: registrationAttemptRef.current.id,
         });
+        registrationAttemptRef.current = null;
         const nextSession: Session = { ...result.session, deviceId: result.device.id };
         await saveSession(toStoredSession(result.user, nextSession));
         applySession(result.user, nextSession);
@@ -286,11 +302,13 @@ export function AuthProvider({ children }: PropsWithChildren): React.JSX.Element
       },
 
       async logout() {
-        try {
-          await authApi.logout();
-        } finally {
-          await clearAuth();
-        }
+        // Signed out here at once; the server is told in the background
+        // (and again at the next launch if it can't be reached). Waiting for
+        // it first kept the person on a spinner for the full request timeout
+        // on a dead connection.
+        const ending = sessionRef.current;
+        await clearAuth();
+        if (ending) void endSessionOnServer({ accessToken: ending.accessToken, refreshToken: ending.refreshToken });
       },
 
       async logoutAllDevices() {

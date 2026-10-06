@@ -303,3 +303,99 @@ fn a_replayed_ciphertext_is_a_duplicate_not_a_failure() {
     // And the conversation carries on normally.
     assert_all_talk(&[&a, &b], &gid);
 }
+
+/// The app killed between decrypting a received message and storing it:
+/// the checkpoint had already erased the message's key, so on restart MLS
+/// refused it as a duplicate and the message was gone for good.
+mod crash_between_decrypt_and_store {
+    use super::*;
+
+    /// What happens on restart: the provider is dropped (the in-memory group
+    /// database with it) and reopened from its encrypted blob on disk.
+    fn restart(dev: Dev) -> Dev {
+        let Dev { provider, key, path } = dev;
+        drop(provider);
+        Dev { provider: GroupProvider::open(&path, &[9u8; 32]).unwrap(), key, path }
+    }
+
+    fn read_once(dev: &Dev, gid: &[u8], id: &str, ct: &[u8]) -> Result<String, MlsCoreError> {
+        let result = group::decrypt_message_once(&dev.provider, gid, id, ct);
+        dev.provider.checkpoint().unwrap(); // as lib.rs's with_group_store does after every call
+        result
+    }
+
+    fn pair(name: &str) -> (Dev, Dev, Vec<u8>) {
+        let (a, b) = (Dev::new(&format!("{name}a")), Dev::new(&format!("{name}b")));
+        let gid = format!("conv-{name}").into_bytes();
+        let built = a.rebuild(&gid, &[b.key_package()]);
+        b.join(&built.welcome);
+        (a, b, gid)
+    }
+
+    #[test]
+    fn the_old_path_loses_the_message() {
+        let (a, b, gid) = pair("old");
+        let ct = a.send(&gid, "hello");
+        assert_eq!(b.read(&gid, &ct).unwrap(), "hello");
+        b.provider.checkpoint().unwrap();
+        let b = restart(b); // app killed before the plaintext reached its database
+        assert!(matches!(b.read(&gid, &ct), Err(MlsCoreError::DuplicateMessage)));
+    }
+
+    #[test]
+    fn after_a_crash_the_same_row_decrypts_to_the_same_plaintext() {
+        let (a, b, gid) = pair("crash");
+        let ct = a.send(&gid, "survives a crash");
+        assert_eq!(read_once(&b, &gid, "row-1", &ct).unwrap(), "survives a crash");
+        let b = restart(b);
+        assert_eq!(group::pending_decrypted_ids(&b.provider).unwrap(), vec!["row-1".to_string()]);
+        assert_eq!(read_once(&b, &gid, "row-1", &ct).unwrap(), "survives a crash");
+        // And the group keeps working afterwards, both ways.
+        let next = a.send(&gid, "next");
+        assert_eq!(read_once(&b, &gid, "row-2", &next).unwrap(), "next");
+        assert_eq!(a.read(&gid, &b.send(&gid, "reply")).unwrap(), "reply");
+    }
+
+    #[test]
+    fn once_acknowledged_the_plaintext_is_gone_and_the_row_cannot_be_decrypted_again() {
+        let (a, b, gid) = pair("ack");
+        let ct = a.send(&gid, "stored");
+        read_once(&b, &gid, "row-1", &ct).unwrap();
+        group::ack_decrypted(&b.provider, &["row-1".to_string()]).unwrap();
+        b.provider.checkpoint().unwrap();
+        let b = restart(b);
+        assert!(group::pending_decrypted_ids(&b.provider).unwrap().is_empty());
+        assert!(matches!(read_once(&b, &gid, "row-1", &ct), Err(MlsCoreError::DuplicateMessage)));
+    }
+
+    #[test]
+    fn a_replay_under_another_id_is_still_refused() {
+        let (a, b, gid) = pair("replay");
+        let ct = a.send(&gid, "once");
+        read_once(&b, &gid, "row-1", &ct).unwrap();
+        assert!(matches!(read_once(&b, &gid, "row-forged", &ct), Err(MlsCoreError::DuplicateMessage)));
+    }
+
+    #[test]
+    fn other_bytes_under_a_kept_id_are_refused_not_answered_with_the_kept_plaintext() {
+        let (a, b, gid) = pair("swap");
+        let ct = a.send(&gid, "original");
+        read_once(&b, &gid, "row-1", &ct).unwrap();
+        let other = a.send(&gid, "other");
+        assert!(matches!(read_once(&b, &gid, "row-1", &other), Err(MlsCoreError::InvalidCiphertext)));
+    }
+
+    #[test]
+    fn a_failed_decrypt_keeps_nothing() {
+        let (a, b, gid) = pair("bad");
+        let mut ct = a.send(&gid, "tampered");
+        let last = ct.len() - 1;
+        ct[last] ^= 0xff;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_once(&b, &gid, "row-1", &ct)));
+        std::panic::set_hook(hook);
+        assert!(!matches!(outcome, Ok(Ok(_))));
+        assert!(group::pending_decrypted_ids(&b.provider).unwrap().is_empty());
+    }
+}

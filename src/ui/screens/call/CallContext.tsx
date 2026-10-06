@@ -183,6 +183,21 @@ export function CallProvider({ children }: PropsWithChildren): React.JSX.Element
     });
   }, [status, handleIncoming]);
 
+  // A call still ringing here when the socket comes back may have ended (or
+  // been answered on another device) while this device couldn't hear it —
+  // Android freezes a backgrounded app and the server then drops its socket.
+  // Fetching it again makes the server reply call.ended if so. Callee only:
+  // the server answers anyone else's fetch with "cancelled".
+  useEffect(() => {
+    if (status !== 'authenticated') return;
+    return realtime.onStatus((next) => {
+      const session = activeSession();
+      if (next === 'online' && session?.snapshot.phase === 'incoming') {
+        realtime.send({ type: 'call.fetch', callId: session.snapshot.callId });
+      }
+    });
+  }, [status]);
+
   // An incoming call interrupted by another app taking the audio (a regular
   // phone call) mutes the microphone until the audio comes back.
   useEffect(() => {

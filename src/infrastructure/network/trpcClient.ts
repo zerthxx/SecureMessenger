@@ -13,6 +13,8 @@ import { createTRPCUntypedClient, httpBatchLink, TRPCClientError } from '@trpc/c
 // `inferProcedureInput`/`inferOutput`, so a server-side schema change
 // still shows up here as a type error instead of silently drifting.
 import type { AppRouter, RouterInputs, RouterOutputs } from '../../../server/src/trpc/router';
+import { transportFailureMessage } from './apiErrorMessage';
+import { fetchWithTimeout } from './fetchWithTimeout';
 
 /**
  * 10.0.2.2 is the Android emulator's alias for the host machine's
@@ -72,11 +74,20 @@ export function getAccessTokenForRequest(): string | null {
   return currentAccessToken;
 }
 
+/**
+ * Every API call gives up after this long (see fetchWithTimeout for why
+ * there is otherwise no limit at all). Generous, so a slow but working
+ * network still gets its answer: a send that times out after the server
+ * stored it comes back as "failed", and retrying it sends a second copy.
+ */
+const API_TIMEOUT_MS = 45_000;
+
 const untypedClient = createTRPCUntypedClient<AppRouter>({
   links: [
     httpBatchLink({
       url: `${API_BASE_URL}/trpc`,
       headers: () => (currentAccessToken ? { authorization: `Bearer ${currentAccessToken}` } : {}),
+      fetch: (url, init) => fetchWithTimeout(String(url), init as RequestInit | undefined, API_TIMEOUT_MS),
     }),
   ],
 });
@@ -166,6 +177,25 @@ export async function refreshAccessTokenOnce(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Ends a session on the server with an explicit access token, outside the
+ * client's own token state — signing out clears that first (see
+ * pendingSignOuts.ts). The HTTP status, or null when the server couldn't be
+ * reached.
+ */
+export async function logoutWithToken(accessToken: string): Promise<number | null> {
+  try {
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/trpc/auth.logout`,
+      { method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' } },
+      API_TIMEOUT_MS,
+    );
+    return response.status;
+  } catch {
+    return null;
   }
 }
 
@@ -349,6 +379,9 @@ function firstValidationIssueMessage(message: string): string | null {
 /** Turns a tRPC error, or a plain Error thrown by local orchestration code, into a message safe to show directly in the UI. */
 export function getApiErrorMessage(err: unknown, fallback = 'Something went wrong. Please try again.'): string {
   if (err instanceof TRPCClientError) {
+    // No answer from the API itself (offline, timed out, a proxy's error page): a plain explanation, never the raw transport error.
+    const transport = transportFailureMessage(err);
+    if (transport) return transport;
     return firstValidationIssueMessage(err.message) ?? (err.message || fallback);
   }
   if (err instanceof Error && err.message) {

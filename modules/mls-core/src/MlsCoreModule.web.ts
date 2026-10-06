@@ -43,6 +43,15 @@ class MlsCoreModule extends NativeModule<{}> {
   decryptMessage(): Promise<never> {
     throw new Error('MlsCore is not supported on web.');
   }
+  decryptMessageOnce(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  ackDecrypted(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  pendingDecryptedIds(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
   sealCallSignal(): Promise<never> {
     throw new Error('MlsCore is not supported on web.');
   }

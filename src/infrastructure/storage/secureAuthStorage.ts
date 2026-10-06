@@ -70,3 +70,29 @@ export async function loadSession(): Promise<StoredSession | null> {
 export async function clearSession(): Promise<void> {
   await Promise.all(Object.values(KEYS).map((key) => SecureStore.deleteItemAsync(key)));
 }
+
+const PENDING_SIGN_OUTS_KEY = 'auth_pending_signouts';
+
+/**
+ * Sessions this device signed out of whose end the server hasn't confirmed
+ * yet (see network/sessionRevocation.ts). Their tokens are kept only until
+ * the server has ended them — here, with the other auth material.
+ */
+export async function loadPendingSignOuts(): Promise<{ accessToken: string; refreshToken: string }[]> {
+  try {
+    const raw = await SecureStore.getItemAsync(PENDING_SIGN_OUTS_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is { accessToken: string; refreshToken: string } =>
+        typeof item === 'object' && item !== null && typeof item.accessToken === 'string' && typeof item.refreshToken === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function savePendingSignOuts(items: { accessToken: string; refreshToken: string }[]): Promise<void> {
+  if (items.length === 0) await SecureStore.deleteItemAsync(PENDING_SIGN_OUTS_KEY);
+  else await SecureStore.setItemAsync(PENDING_SIGN_OUTS_KEY, JSON.stringify(items));
+}

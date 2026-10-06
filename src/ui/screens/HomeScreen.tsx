@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter, type Href } from 'expo-router';
@@ -69,22 +69,7 @@ export function HomeScreen(): React.JSX.Element {
       accessibilityLabel: 'Start a new chat',
       onPress: () => router.push('/(home)/chats/new' as unknown as Href),
     },
-    {
-      icon: 'people-outline',
-      label: 'New group',
-      accessibilityLabel: 'Create a new group',
-      onPress: () => router.push('/(home)/groups' as unknown as Href),
-    },
-    {
-      icon: 'qr-code-outline',
-      label: 'Scan code',
-      accessibilityLabel: 'Scan a QR code',
-      onPress: () =>
-        Alert.alert(
-          'Scan code unavailable',
-          'QR code scanning needs camera access that this build does not yet include. This will be enabled in a future update.',
-        ),
-    },
+    // New group and Scan code are hidden until group chats and QR scanning exist.
   ];
 
   return (
