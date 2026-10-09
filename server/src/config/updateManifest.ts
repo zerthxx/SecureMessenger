@@ -31,21 +31,21 @@ export interface UpdateManifest {
   mandatory: boolean;
 }
 
-// v0.8.0 — apkUrl/sha256 point at the signed release APK uploaded to GitHub
-// Releases (zerthxx/SecureMessenger, tag v0.8.0); sha256 was computed locally
+// v0.10.0 — apkUrl/sha256 point at the signed release APK uploaded to GitHub
+// Releases (zerthxx/SecureMessenger, tag v0.10.0); sha256 was computed locally
 // from the uploaded file. Signed with the same production keystore as
-// v0.5.0–v0.7.0 (certificate SHA-256 4f:90:8d:90:…:ca:b5:98, see
+// v0.5.0–v0.9.0 (certificate SHA-256 4f:90:8d:90:…:ca:b5:98, see
 // keystores/KEYSTORE_INFO.md), so it installs in place over those versions.
 // Devices still on a pre-v0.5.0 production APK (signed with the original, lost
 // key) must uninstall and reinstall. Update this whole object (and bump
 // versionCode) the next time a signed release APK is cut and uploaded.
 export const CURRENT_UPDATE_MANIFEST: UpdateManifest = {
-  versionName: '0.9.0',
-  versionCode: 9,
-  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.9.0/app-release.apk',
-  sha256: '26bccdbb6e1fb0461e7184cd9619647fc5fb8813aac745ad430b62e4d5a48289',
+  versionName: '0.10.0',
+  versionCode: 10,
+  apkUrl: 'https://github.com/zerthxx/SecureMessenger/releases/download/v0.10.0/app-release.apk',
+  sha256: 'f97508549243a60fde70c6bc0095f9a8d4dcb5ced676a0cf76ca8c2c49f13f0f',
   releaseNotes:
-    'More reliable encrypted messaging: no lost, duplicated or unreadable messages after a crash, a lost connection or a retry. Faster reconnects, instant sign-out, and the keyboard no longer covers the message box.',
-  // Required: conversations rebuilt by 0.9 use group generations that 0.8 can't read.
+    'Voice messages that always play, new messages and notifications while the app is in the background, and faster recovery when the connection drops.',
+  // Required: 0.9 can't read the per-clip voice key envelope that 0.10 sends.
   mandatory: true,
 };
