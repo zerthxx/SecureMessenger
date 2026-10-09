@@ -37,6 +37,8 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
   const B_REVOKED = 'b0000000-0000-4000-8000-000000000002';
   const B_EXPIRED = 'b0000000-0000-4000-8000-000000000003';
   const B_NO_E2EE = 'b0000000-0000-4000-8000-000000000004';
+  /** Signed in, E2EE-ready, but silent for longer than ADDRESSABLE_IDLE_MS: a wiped or abandoned phone. */
+  const B_STALE = 'b0000000-0000-4000-8000-000000000005';
   const M1 = 'c0000000-0000-4000-8000-000000000001';
   const WELCOME = Buffer.from('welcome-bytes').toString('base64');
   const CT = Buffer.from('ciphertext').toString('base64');
@@ -44,10 +46,17 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
   let ctCounter = 0;
   const ct = () => Buffer.from(`ciphertext-${++ctCounter}`).toString('base64');
 
+  /** Response headers the last call set (Retry-After under load shedding). */
+  const responseHeaders: Record<string, string> = {};
+
   function as(userId: string, deviceId: string) {
     const ctx = {
       req: { ip: '203.0.113.9' },
-      res: {},
+      res: {
+        header: (name: string, value: string) => {
+          responseHeaders[name] = value;
+        },
+      },
       log: { info: () => {}, warn: () => {}, error: () => {} },
       db: m.db.db,
       user: { id: userId },
@@ -88,11 +97,18 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
        values ($1,'alice','Alice','x','x'), ($2,'bob','Bob','x','x'), ($3,'mallory','Mallory','x','x')`,
       [ALICE, BOB, MALLORY],
     );
-    const device = (id: string, user: string, opts: { revoked?: boolean; expires?: Date; key?: boolean } = {}) =>
+    const device = (id: string, user: string, opts: { revoked?: boolean; expires?: Date; key?: boolean; seen?: Date } = {}) =>
       pool.query(
-        `insert into devices(id, user_id, name, platform, refresh_token_expires_at, revoked_at, mls_credential_public_key)
-         values ($1, $2, 'phone', 'android', $3, $4, $5)`,
-        [id, user, opts.expires ?? future, opts.revoked ? new Date() : null, opts.key === false ? null : Buffer.from(`key-${id}`)],
+        `insert into devices(id, user_id, name, platform, refresh_token_expires_at, revoked_at, mls_credential_public_key, last_seen_at)
+         values ($1, $2, 'phone', 'android', $3, $4, $5, $6)`,
+        [
+          id,
+          user,
+          opts.expires ?? future,
+          opts.revoked ? new Date() : null,
+          opts.key === false ? null : Buffer.from(`key-${id}`),
+          opts.seen ?? new Date(),
+        ],
       );
     await device(A1, ALICE);
     await device(A2, ALICE);
@@ -100,6 +116,7 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
     await device(B_REVOKED, BOB, { revoked: true });
     await device(B_EXPIRED, BOB, { expires: past });
     await device(B_NO_E2EE, BOB, { key: false });
+    await device(B_STALE, BOB, { seen: new Date(Date.now() - m.router.ADDRESSABLE_IDLE_MS - 60_000) });
     await device(M1, MALLORY);
     ({ conversationId } = await as(ALICE, A1).createConversation({ otherUserId: BOB }));
   });
@@ -210,6 +227,25 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
     });
   });
 
+  test('the conversation list tells each device whether it built the current group', async () => {
+    // Before any group: nobody built generation 0.
+    assert.equal((await as(ALICE, A1).listConversations())[0]?.groupBuiltByThisDevice, false);
+
+    await as(ALICE, A1).resetGroup({ conversationId, expectedGeneration: 0, welcome: WELCOME, recipientDeviceIds: [B1, A2] });
+    // The builder — even after it gave up waiting for the answer or was
+    // killed — can recognise its own group; nobody else can claim it, not
+    // even another device of the same account.
+    assert.equal((await as(ALICE, A1).listConversations())[0]?.groupBuiltByThisDevice, true);
+    assert.equal((await as(ALICE, A2).listConversations())[0]?.groupBuiltByThisDevice, false);
+    assert.equal((await as(BOB, B1).listConversations())[0]?.groupBuiltByThisDevice, false);
+
+    // Once someone else rebuilds, the earlier builder no longer owns the current group.
+    await as(BOB, B1).resetGroup({ conversationId, expectedGeneration: 1, welcome: WELCOME, recipientDeviceIds: [A1] });
+    const [forAlice] = await as(ALICE, A1).listConversations();
+    assert.deepEqual({ generation: forAlice?.groupGeneration, mine: forAlice?.groupBuiltByThisDevice }, { generation: 2, mine: false });
+    assert.equal((await as(BOB, B1).listConversations())[0]?.groupBuiltByThisDevice, true);
+  });
+
   test('createConversation reports the current generation for an existing conversation', async () => {
     assert.deepEqual(await as(BOB, B1).createConversation({ otherUserId: ALICE }), { conversationId, groupGeneration: 0 });
     await as(ALICE, A1).resetGroup({ conversationId, expectedGeneration: 0, welcome: WELCOME, recipientDeviceIds: [B1] });
@@ -245,7 +281,7 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
 
   test('group setup only addresses active, E2EE-ready devices of the members', async () => {
     const alice = as(ALICE, A1);
-    for (const bad of [B_REVOKED, B_EXPIRED, B_NO_E2EE, M1]) {
+    for (const bad of [B_REVOKED, B_EXPIRED, B_NO_E2EE, B_STALE, M1]) {
       await assert.rejects(
         alice.resetGroup({ conversationId, expectedGeneration: 0, welcome: WELCOME, recipientDeviceIds: [B1, bad] }),
         trpcError('BAD_REQUEST'),
@@ -300,6 +336,11 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
   test('a device whose session expired without signing out gets no KeyPackages consumed', async () => {
     await m.db.pool.query(`insert into device_key_packages(device_id, public_key_package) values ($1, $2)`, [B_EXPIRED, Buffer.from('kp')]);
     assert.deepEqual(await as(ALICE, A1).consumeKeyPackage({ targetDeviceId: B_EXPIRED }), { keyPackage: null });
+    // A phone that was wiped or abandoned without signing out: silent past
+    // ADDRESSABLE_IDLE_MS, so its KeyPackages are not handed out either.
+    await as(BOB, B_STALE).publishKeyPackages({ keyPackages: [Buffer.from('stale').toString('base64')] });
+    assert.deepEqual(await as(ALICE, A1).consumeKeyPackage({ targetDeviceId: B_STALE }), { keyPackage: null });
+    assert.equal((await as(ALICE, A1).listConversationDevices({ conversationId })).some((d) => d.deviceId === B_STALE), false);
   });
 
   test('a Welcome claiming a generation is refused — generations only come from resetGroup', async () => {
@@ -362,5 +403,111 @@ describe('e2ee group generations (Postgres)', { skip: url ? false : 'E2EE_TEST_D
     assert.deepEqual(await as(MALLORY, M1).listActiveDeviceIds({ userId: BOB }), []);
     assert.ok((await as(ALICE, A1).listActiveDeviceIds({ userId: BOB })).includes(B1));
     assert.ok((await as(BOB, B1).listActiveDeviceIds({ userId: BOB })).includes(B1));
+  });
+
+  // sendMessage folds its two authorization checks into one statement (the
+  // database is far from the API in production); each must still refuse.
+  test('only an active device of a member can send', async () => {
+    const { rows: before } = await m.db.pool.query(`select count(*)::int as n from messages`);
+    await assert.rejects(
+      as(MALLORY, M1).sendMessage({ conversationId, ciphertext: ct(), messageType: 'application', mlsGeneration: 1 }),
+      trpcError('FORBIDDEN'),
+    );
+    await assert.rejects(
+      as(BOB, B_REVOKED).sendMessage({ conversationId, ciphertext: ct(), messageType: 'application', mlsGeneration: 1 }),
+      trpcError('UNAUTHORIZED'),
+    );
+    // A device that no longer exists at all is refused the same way.
+    await assert.rejects(
+      as(BOB, 'b0000000-0000-4000-8000-0000000000ff').sendMessage({ conversationId, ciphertext: ct(), messageType: 'application', mlsGeneration: 1 }),
+      trpcError('UNAUTHORIZED'),
+    );
+    const { rows: after } = await m.db.pool.query(`select count(*)::int as n from messages`);
+    assert.equal(after[0].n, before[0].n, 'nothing was stored');
+  });
+
+  // Found by the scale mission's outage test: pg's Pool emits 'error' for an
+  // idle client whose backend goes away (database restart, pause, network
+  // blip). Unhandled, that event took the whole process down, which turned a
+  // database blip into an API outage with every socket dropped.
+  test('losing the idle database connections does not kill the process, and the pool recovers', async () => {
+    // Warm a few idle connections, then have the database close every
+    // backend except the one running this statement.
+    await Promise.all([1, 2, 3].map(() => m.db.pool.query('select pg_sleep(0.05)')));
+    assert.ok(m.db.pool.idleCount >= 1, 'the pool holds idle connections');
+    await m.db.pool.query(
+      `select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()`,
+    );
+    // Give the closed sockets a moment to surface as pool 'error' events.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const { rows } = await m.db.pool.query('select 1 as ok');
+    assert.equal(rows[0].ok, 1, 'the pool serves queries again on fresh connections');
+  });
+
+  /** Holds every pooled connection busy and queues `extra` more requests behind them. */
+  function saturatePool(extra: number, seconds = 0.4) {
+    const max = m.db.poolStats().max;
+    const busy = Promise.all(Array.from({ length: max + extra }, () => m.db.pool.query('select pg_sleep($1)', [seconds])));
+    busy.catch(() => {});
+    return busy;
+  }
+
+  test('pool exhaustion is visible as a wait queue and drains by itself', async () => {
+    const busy = saturatePool(5);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const during = m.db.poolStats();
+    assert.equal(during.total, during.max, 'every connection is open');
+    assert.equal(during.idle, 0);
+    assert.ok(during.waiting >= 1, `requests queue once the pool is full (waiting=${during.waiting})`);
+    await busy;
+    const after = m.db.poolStats();
+    assert.equal(after.waiting, 0, 'the queue drains once the work finishes');
+  });
+
+  test('under pool overload, polling is shed with Retry-After while a send still goes through and is stored once', async () => {
+    const { shedWaitingThreshold } = await import('../../config/env.js');
+    assert.ok(shedWaitingThreshold > 0, 'shedding is on by default');
+    await as(ALICE, A1).resetGroup({ conversationId, expectedGeneration: 0, welcome: WELCOME, recipientDeviceIds: [B1] });
+    // Queue deeper than the threshold, then poll and send concurrently.
+    const busy = saturatePool(shedWaitingThreshold + 5, 0.6);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.ok(m.db.poolStats().waiting > shedWaitingThreshold, 'the queue is past the threshold');
+    delete responseHeaders['Retry-After'];
+    await assert.rejects(as(ALICE, A1).listConversations(), trpcError('TOO_MANY_REQUESTS'));
+    await assert.rejects(as(ALICE, A1).fetchMessages({ conversationId }), trpcError('TOO_MANY_REQUESTS'));
+    const retryAfter = Number(responseHeaders['Retry-After']);
+    assert.ok(retryAfter >= 5 && retryAfter <= 30, `Retry-After is set (${responseHeaders['Retry-After']})`);
+    // The send is not shed: it queues behind the busy connections and lands exactly once.
+    const generation = (await (async () => {
+      const { rows } = await m.db.pool.query(`select mls_generation from conversations where id = $1`, [conversationId]);
+      return rows[0].mls_generation as number;
+    })());
+    const ciphertext = ct();
+    const sent = await as(ALICE, A1).sendMessage({ conversationId, ciphertext, messageType: 'application', mlsGeneration: generation });
+    await busy;
+    const { rows } = await m.db.pool.query(`select count(*)::int as n from messages where id = $1`, [sent.messageId]);
+    assert.equal(rows[0].n, 1);
+    // Recovery: once the queue drains, polling works again without any restart.
+    assert.equal(m.db.poolStats().waiting, 0);
+    assert.ok(Array.isArray(await as(ALICE, A1).listConversations()));
+  });
+
+  test('/health/db reports reachability and pool counts and nothing else', async () => {
+    const { buildApp } = await import('../../app.js');
+    const app = buildApp();
+    try {
+      const res = await app.inject({ method: 'GET', url: '/health/db' });
+      assert.equal(res.statusCode, 200);
+      const body = res.json() as Record<string, unknown>;
+      assert.deepEqual(Object.keys(body).sort(), ['database', 'latencyMs', 'pool', 'status']);
+      assert.equal(body.status, 'ok');
+      assert.equal(body.database, 'reachable');
+      assert.equal(typeof body.latencyMs, 'number');
+      assert.deepEqual(Object.keys(body.pool as object).sort(), ['idle', 'max', 'total', 'waiting']);
+      for (const value of Object.values(body.pool as Record<string, unknown>)) assert.equal(typeof value, 'number');
+      assert.ok(!JSON.stringify(body).includes('postgres://'), 'no connection string in the response');
+    } finally {
+      await app.close();
+    }
   });
 });

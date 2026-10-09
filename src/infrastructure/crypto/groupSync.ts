@@ -249,3 +249,68 @@ export function isStaleGenerationError(err: unknown): boolean {
   const text = err instanceof Error ? err.message : String(err);
   return text.includes('STALE_GROUP_GENERATION');
 }
+
+/**
+ * What to do with a rebuild this device started but never saw confirmed: the
+ * native group was already replaced by the candidate for `candidate`, the
+ * local generation set to 0 (see ChatContext.rebuildConversationGroup), and
+ * then resetGroup's answer was lost, or the app was killed. Rebuilding
+ * blindly would cost everyone another rejoin, so first ask the server:
+ *
+ * - `adopt`: the server kept exactly this candidate, built by this device —
+ *   the local copy is the real group; label it.
+ * - `discard`: anything else — delete the local copy; the usual rules then
+ *   join or rebuild.
+ * - `forget`: this device already holds a labelled group (it joined a
+ *   Welcome meanwhile); only the note is stale, the group must stay.
+ *
+ * Invariant this protects: the local generation label only ever names the
+ * group the server accepted. A label ahead of or behind the native group
+ * made this device encrypt for a group nobody else had (or decrypt the
+ * others' messages with the wrong keys) — every such message showed as
+ * "Unable to decrypt", for good.
+ */
+export function resolveRebuildCandidate(state: {
+  candidate: number;
+  localGeneration: number;
+  serverGeneration: number;
+  builtByThisDevice: boolean;
+}): 'adopt' | 'discard' | 'forget' {
+  if (state.localGeneration > 0) return 'forget';
+  if (state.builtByThisDevice && state.serverGeneration === state.candidate) return 'adopt';
+  return 'discard';
+}
+
+/**
+ * Whether a rebuild prepared for `expectedGeneration` may still go ahead
+ * after the final sync that runs right before the native rebuild. That
+ * sync exists to shrink the window in which the other side's messages to
+ * the current group are lost for this device: the native rebuild deletes
+ * the current group (OpenMLS keeps one group per id, and the id is bound
+ * into the group's own context, so two generations cannot coexist), so
+ * anything this device hasn't fetched and decrypted by then is gone for
+ * it — never red, but grey. Reading everything the server has first leaves
+ * only the native call itself as the window. If that sync joined a newer
+ * Welcome, the rebuild it was preparing is for a group the server has
+ * already replaced: it must not run, or it would delete the group just
+ * joined and be refused anyway.
+ */
+export function rebuildStillApplies(state: { localGenerationBeforeSync: number; localGenerationAfterSync: number }): boolean {
+  // The device that rebuilds is normally BEHIND the server (0 after a wipe,
+  // an older generation otherwise), so the local generation says nothing
+  // about whether the rebuild is still right; only a change during the
+  // final sync does — that is a Welcome joined, i.e. someone else's group.
+  return state.localGenerationAfterSync === state.localGenerationBeforeSync;
+}
+
+/**
+ * A row this device sent whose response never arrived (a timeout, a dropped
+ * connection): the local row is still "sending"/"failed" under its local id,
+ * but the server has the message. MLS never produces the same ciphertext
+ * twice, so a row carrying exactly the bytes a local send sealed (see
+ * ChatContext.sealOnce) is that send, and is confirmed in place instead of
+ * being stored again as a message "sent before this device joined".
+ */
+export function findPendingSendForRow(ciphertext: string, pending: readonly { localId: string; ciphertext: string }[]): string | null {
+  return pending.find((send) => send.ciphertext === ciphertext)?.localId ?? null;
+}

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, AppState, FlatList, KeyboardAvoidingView, Platform, StyleSheet, View, type ListRenderItemInfo } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import type { Message } from '@/domain/entities';
+import { nextPollDelayMs } from '@/infrastructure/network/pollSchedule';
 import { getApiErrorMessage } from '@/infrastructure/network/trpcClient';
 import { setActiveConversation } from '@/infrastructure/notifications/pushNotifications';
 import { realtime } from '@/infrastructure/realtime/realtimeClient';
@@ -14,9 +15,10 @@ import { useCall } from '@/ui/screens/call';
 import { useChat } from './ChatContext';
 import { loadOlderMessages, useConversationMessages } from './conversationMessages';
 
+/** The first wait between polls while the realtime socket is down; each quiet poll doubles it (see pollSchedule.ts). */
 const POLL_MS = 3000;
-/** With the realtime socket connected, only every Nth poll runs (30 s): new messages arrive as hints instead. */
-const ONLINE_POLL_EVERY = 10;
+/** The wait with the socket connected (new messages arrive as hints instead), and the cap while it is down. */
+const ONLINE_POLL_MS = 30_000;
 
 function keyExtractor(message: Message): string {
   return message.id;
@@ -64,6 +66,10 @@ export function ConversationScreen(): React.JSX.Element {
   // conversation's messages change, and already-stored messages show
   // immediately instead of waiting for the first network sync.
   const { messages, hasOlder } = useConversationMessages(id);
+  // Read by the poll timer below to tell a quiet poll from one that found
+  // something (a reply, or this person's own send) without re-running the effect.
+  const messageCountRef = useRef(messages.length);
+  messageCountRef.current = messages.length;
 
   useEffect(() => {
     if (!id) return;
@@ -73,44 +79,56 @@ export function ConversationScreen(): React.JSX.Element {
       if (!cancelled) setSynced(true);
     })();
 
-    // Audit fix: this previously polled every POLL_MS unconditionally,
-    // including while backgrounded — the single clearest battery/network
-    // cost found in the client audit, compounding with ChatContext's own
-    // conversation-list poll. Paused while AppState isn't 'active', with
-    // an immediate refresh on returning to foreground so messages aren't
-    // stale on resume.
-    let ticks = 0;
-    const poll = () => {
-      ticks += 1;
-      if (realtime.getStatus() === 'online' && ticks % ONLINE_POLL_EVERY !== 0) return;
-      pollConversation(id);
+    // Polls only while the app is in the foreground (an audit fix: polling
+    // while backgrounded was the clearest battery/network cost), with an
+    // immediate refresh on returning so messages aren't stale on resume.
+    //
+    // The wait between polls comes from pollSchedule.ts: a slow, jittered
+    // safety net while the realtime socket delivers hints; while the socket
+    // is down, polling IS the delivery path, so it starts fast and backs
+    // off with every quiet poll (3 → 6 → 12 → 24 → 30 s), resetting whenever
+    // a poll found messages, the person sent one, or the app came to the
+    // foreground. A fixed 3 s cadence turned a realtime outage into a
+    // database outage at scale (docs/ENGINEERING_CHECKLIST.md, S1).
+    let quietPolls = 0;
+    let lastCount = messageCountRef.current;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer || cancelled) return;
+      const delay = nextPollDelayMs({ realtimeOnline: realtime.getStatus() === 'online', quietPolls, baseMs: POLL_MS, onlineMs: ONLINE_POLL_MS });
+      timer = setTimeout(async () => {
+        timer = null;
+        const online = realtime.getStatus() === 'online';
+        await pollConversation(id);
+        if (cancelled) return;
+        const count = messageCountRef.current;
+        quietPolls = online || count !== lastCount ? 0 : quietPolls + 1;
+        lastCount = count;
+        if (AppState.currentState === 'active') schedule();
+      }, delay);
     };
-    let interval: ReturnType<typeof setInterval> | null = null;
-    const startInterval = () => {
-      if (interval) return;
-      interval = setInterval(poll, POLL_MS);
-    };
-    const stopInterval = () => {
-      if (interval) {
-        clearInterval(interval);
-        interval = null;
+    const stop = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
       }
     };
 
-    if (AppState.currentState === 'active') startInterval();
+    if (AppState.currentState === 'active') schedule();
 
     const subscription = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
+        quietPolls = 0;
         pollConversation(id);
-        startInterval();
+        schedule();
       } else {
-        stopInterval();
+        stop();
       }
     });
 
     return () => {
       cancelled = true;
-      stopInterval();
+      stop();
       subscription.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

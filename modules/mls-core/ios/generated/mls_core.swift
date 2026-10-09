@@ -1208,6 +1208,20 @@ public func encryptMessage(groupId: Data, plaintext: String)throws  -> Data  {
 })
 }
 /**
+ * A fresh random content key for one media blob (a voice clip) — see
+ * blob.rs for why clips are no longer MLS application messages. The key
+ * is message content: the app carries it inside the clip's envelope (an
+ * MLS application message) and caches it with the decrypted message.
+ * Independent of the open stores, so it works before `initialize`.
+ */
+public func generateBlobKey() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_generate_blob_key(uniffiCallStatus
+    )
+})
+}
+/**
  * Generates this device's MLS credential key if one doesn't already
  * exist, cross-signed by the account identity key from
  * [`generate_identity_key`] (which must have been called first, even
@@ -1336,6 +1350,19 @@ public func joinGroupReplacing(welcomeBytes: Data)throws  -> Data  {
 })
 }
 /**
+ * Opens a blob from [`seal_blob`]. `InvalidCiphertext` — never partial
+ * output — for anything tampered with or sealed under another key.
+ */
+public func openBlob(key: Data, sealed: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_open_blob(
+        FfiConverterData.lower(key),
+        FfiConverterData.lower(sealed),uniffiCallStatus
+    )
+})
+}
+/**
  * Opens a payload from [`seal_call_signal`] sealed by another member of the
  * group for the same call. `InvalidCiphertext` — never partial output — for
  * anything tampered with or sealed for a different call, group, or epoch.
@@ -1374,6 +1401,19 @@ public func rebuildGroup(groupId: Data, keyPackages: [Data])throws  -> RebuiltGr
     uniffi_mls_core_fn_func_rebuild_group(
         FfiConverterData.lower(groupId),
         FfiConverterSequenceData.lower(keyPackages),uniffiCallStatus
+    )
+})
+}
+/**
+ * Seals a media blob under a key from [`generate_blob_key`]
+ * (AES-256-GCM, fresh nonce). Only the sealed bytes go to the server.
+ */
+public func sealBlob(key: Data, plaintext: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMlsCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mls_core_fn_func_seal_blob(
+        FfiConverterData.lower(key),
+        FfiConverterData.lower(plaintext),uniffiCallStatus
     )
 })
 }
@@ -1434,6 +1474,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mls_core_checksum_func_encrypt_message() != 41753) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mls_core_checksum_func_generate_blob_key() != 48063) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mls_core_checksum_func_generate_device_credential() != 73) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1455,6 +1498,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mls_core_checksum_func_join_group_replacing() != 48888) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mls_core_checksum_func_open_blob() != 37019) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1462,6 +1508,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mls_core_checksum_func_rebuild_group() != 44606) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_core_checksum_func_seal_blob() != 51012) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mls_core_checksum_func_seal_call_signal() != 7720) {

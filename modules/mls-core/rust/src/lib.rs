@@ -18,6 +18,7 @@
 //! for its own use — never a private key. See each function's doc
 //! comment for exactly what crosses the boundary.
 
+mod blob;
 mod call_signal;
 mod error;
 mod group;
@@ -442,6 +443,30 @@ pub fn seal_call_signal(group_id: Vec<u8>, call_id: String, plaintext: String) -
 #[uniffi::export]
 pub fn open_call_signal(group_id: Vec<u8>, call_id: String, sealed: Vec<u8>) -> Result<String, MlsCoreError> {
     with_group_provider_read_only(|group_provider| call_signal::open_call_signal(group_provider, &group_id, &call_id, &sealed))
+}
+
+/// A fresh random content key for one media blob (a voice clip) — see
+/// blob.rs for why clips are no longer MLS application messages. The key
+/// is message content: the app carries it inside the clip's envelope (an
+/// MLS application message) and caches it with the decrypted message.
+/// Independent of the open stores, so it works before `initialize`.
+#[uniffi::export]
+pub fn generate_blob_key() -> Vec<u8> {
+    blob::generate_blob_key()
+}
+
+/// Seals a media blob under a key from [`generate_blob_key`]
+/// (AES-256-GCM, fresh nonce). Only the sealed bytes go to the server.
+#[uniffi::export]
+pub fn seal_blob(key: Vec<u8>, plaintext: Vec<u8>) -> Result<Vec<u8>, MlsCoreError> {
+    blob::seal_blob(&key, &plaintext)
+}
+
+/// Opens a blob from [`seal_blob`]. `InvalidCiphertext` — never partial
+/// output — for anything tampered with or sealed under another key.
+#[uniffi::export]
+pub fn open_blob(key: Vec<u8>, sealed: Vec<u8>) -> Result<Vec<u8>, MlsCoreError> {
+    blob::open_blob(&key, &sealed)
 }
 
 #[cfg(test)]

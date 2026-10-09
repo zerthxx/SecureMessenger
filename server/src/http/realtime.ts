@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { RawData } from 'ws';
 
 import { checkRateLimit, RateLimitExceededError } from '../lib/rateLimit.js';
+import { realtimeDownForTest } from '../lib/testHooks.js';
 import type { CallParticipant, CallRegistry } from '../realtime/callRegistry.js';
 import type { RealtimeConnection, RealtimeHub } from '../realtime/hub.js';
 import { parseClientMessage, type ClientMessage, type ServerEvent } from '../realtime/protocol.js';
@@ -61,6 +62,10 @@ export async function realtimeRoutes(app: FastifyInstance, options: RealtimeRout
     {
       websocket: true,
       preValidation: async (request, reply) => {
+        if (realtimeDownForTest()) {
+          // Local fault injection only; a no-op in production (see lib/testHooks.ts).
+          return reply.code(503).send({ error: 'TEST HOOK: realtime down' });
+        }
         const header = request.headers.authorization;
         const auth = header?.startsWith('Bearer ') ? await options.authenticate(header.slice('Bearer '.length)) : null;
         if (!auth || auth.expiresAt <= now()) {

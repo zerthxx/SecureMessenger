@@ -146,3 +146,24 @@ export async function sealCallSignal(groupId: Uint8Array, callId: string, plaint
 export async function openCallSignal(groupId: Uint8Array, callId: string, sealed: Uint8Array): Promise<string> {
   return MlsCoreModuleNative.openCallSignal(groupId, callId, sealed);
 }
+
+/**
+ * Media blobs (voice clips) are sealed under a random per-message content
+ * key — never as MLS application messages, whose single-use keys a
+ * receiver keeps only briefly (see rust/src/blob.rs). The key travels
+ * inside the clip's envelope, itself an MLS application message, and is
+ * cached with the decrypted message: message content, not device key
+ * material. Pure functions: usable before the account's stores are open.
+ */
+export async function generateBlobKey(): Promise<Uint8Array> {
+  return MlsCoreModuleNative.generateBlobKey();
+}
+
+export async function sealBlob(key: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> {
+  return MlsCoreModuleNative.sealBlob(key, plaintext);
+}
+
+/** Throws (InvalidCiphertext) for anything tampered with or sealed under another key — never partial output. */
+export async function openBlob(key: Uint8Array, sealed: Uint8Array): Promise<Uint8Array> {
+  return MlsCoreModuleNative.openBlob(key, sealed);
+}

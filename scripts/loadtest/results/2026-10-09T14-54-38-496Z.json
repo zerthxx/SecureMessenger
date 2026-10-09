@@ -1,0 +1,62 @@
+{
+  "startedAt": "2026-10-09T14:54:38.496Z",
+  "base": "http://127.0.0.1:4200",
+  "users": 100,
+  "duration": 60,
+  "rate": 6,
+  "registered": 100,
+  "registerErrors": {},
+  "setupErrors": {},
+  "conversations": 50,
+  "sockets": {
+    "opened": 100,
+    "closed": 0,
+    "reconnects": 0,
+    "errors": 0,
+    "openAfterConnect": 100
+  },
+  "sends": {
+    "ok": 153,
+    "failed": 439,
+    "timeouts": 0,
+    "errors": {
+      "401 This device has been signed out.": 107,
+      "500 Failed query: \n        insert into messages (conversation_id, sender_device_": 2,
+      "401 This session has been terminated. Please log in again.": 328,
+      "500 Failed query: select \"devices\".\"user_id\", \"devices\".\"revoked_at\", \"devices\".": 1,
+      "500 Failed query: select \"devices\".\"revoked_at\", \"conversation_members\".\"user_id": 1
+    },
+    "p50": 315,
+    "p95": 504,
+    "p99": 626,
+    "max": 749,
+    "perSecond": 2.2
+  },
+  "hints": {
+    "expected": 592,
+    "received": 153,
+    "p50": 483,
+    "p95": 765,
+    "p99": 843,
+    "max": 921
+  },
+  "fetch": {
+    "calls": 254,
+    "errors": {
+      "403 Not a member of this conversation.": 1,
+      "401 This session has been terminated. Please log in again.": 100,
+      "500 Failed query: select \"devices\".\"user_id\", \"devices\".\"revoked_at\", \"devices\".": 1
+    },
+    "rows": 0,
+    "duplicates": 0,
+    "outOfOrder": 0,
+    "missing": 0,
+    "p50": 327,
+    "p95": 501,
+    "p99": 688,
+    "max": 720
+  },
+  "registerSeconds": 7.386,
+  "setupSeconds": 22.084,
+  "trafficSeconds": 70.018
+}

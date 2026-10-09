@@ -4,7 +4,7 @@ import { test, describe, beforeEach } from 'node:test';
 import fastify from 'fastify';
 
 import { checkRateLimit, RateLimitExceededError, __resetRateLimitsForTest } from '../lib/rateLimit.js';
-import { RAILWAY_TRUST_PROXY, resolveTrustProxy } from './trustProxy.js';
+import { isHopCountTrustProxy, RAILWAY_TRUST_PROXY, resolveTrustProxy } from './trustProxy.js';
 
 describe('resolveTrustProxy', () => {
   test('defaults to trusting nothing outside production', () => {
@@ -21,9 +21,15 @@ describe('resolveTrustProxy', () => {
     assert.equal(resolveTrustProxy('   ', true), false);
   });
 
-  test('parses hop counts as numbers', () => {
-    assert.equal(resolveTrustProxy('1', false), 1);
-    assert.equal(resolveTrustProxy('2', false), 2);
+  test('a hop count is refused (fail closed) and reported, never trusted blindly', () => {
+    // fastify ≥ 5.12 treats a numeric trustProxy as "trust nothing"; the
+    // option must not reach it as a number at all.
+    assert.equal(resolveTrustProxy('1', false), false);
+    assert.equal(resolveTrustProxy('2', true), false);
+    assert.equal(isHopCountTrustProxy('2'), true);
+    assert.equal(isHopCountTrustProxy(' 10 '), true);
+    assert.equal(isHopCountTrustProxy('loopback'), false);
+    assert.equal(isHopCountTrustProxy(undefined), false);
   });
 
   test('passes CIDR lists through verbatim', () => {
@@ -42,7 +48,7 @@ describe('resolveTrustProxy', () => {
 // Deliberately does not call `ready()` — `inject()` boots the instance
 // on demand, and readying here would lock out tests that register an
 // additional route before injecting.
-async function ipEcho(trustProxy: boolean | number | string) {
+async function ipEcho(trustProxy: boolean | string) {
   const app = fastify({ trustProxy });
   app.get('/ip', async (req) => ({ ip: req.ip }));
   return app;

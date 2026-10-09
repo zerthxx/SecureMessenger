@@ -28,6 +28,9 @@ import uniffi.mls_core.initialize as mlsCoreInitialize
 import uniffi.mls_core.joinGroupFromWelcome
 import uniffi.mls_core.openCallSignal
 import uniffi.mls_core.sealCallSignal
+import uniffi.mls_core.generateBlobKey
+import uniffi.mls_core.sealBlob
+import uniffi.mls_core.openBlob
 
 // TEMPORARY diagnostic instrumentation — see MasterKeyManager.kt's
 // DIAG_TAG comment for full context. Same tag string (file-private
@@ -392,6 +395,30 @@ class MlsCoreModule : Module() {
       requireInitialized()
       try {
         openCallSignal(groupId, callId, sealed)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    // Media blobs (voice clips) are sealed under a random per-message content
+    // key that travels inside the MLS-encrypted envelope — see
+    // rust/src/blob.rs for why they are no longer MLS application messages.
+    // Pure functions: no account store involved, so no requireInitialized().
+    AsyncFunction("generateBlobKey") {
+      generateBlobKey()
+    }
+
+    AsyncFunction("sealBlob") { key: ByteArray, plaintext: ByteArray ->
+      try {
+        sealBlob(key, plaintext)
+      } catch (e: MlsCoreException) {
+        throw MlsCoreRuntimeError(e)
+      }
+    }
+
+    AsyncFunction("openBlob") { key: ByteArray, sealed: ByteArray ->
+      try {
+        openBlob(key, sealed)
       } catch (e: MlsCoreException) {
         throw MlsCoreRuntimeError(e)
       }

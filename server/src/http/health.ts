@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 
-import { pingDatabase } from '../db/client.js';
+import { pingDatabase, poolStats } from '../db/client.js';
 
 /**
  * Plain REST, not tRPC — health checks are read by infrastructure
@@ -19,11 +19,13 @@ export async function healthRoutes(app: FastifyInstance) {
 
   app.get('/health/db', async (_req, reply) => {
     try {
+      const start = Date.now();
       await pingDatabase();
-      return { status: 'ok' as const, database: 'reachable' as const };
+      // `pool.waiting` > 0 means requests are queueing for a connection.
+      return { status: 'ok' as const, database: 'reachable' as const, latencyMs: Date.now() - start, pool: poolStats() };
     } catch (err) {
       app.log.error({ err }, 'readiness check failed: database unreachable');
-      return reply.status(503).send({ status: 'error' as const, database: 'unreachable' as const });
+      return reply.status(503).send({ status: 'error' as const, database: 'unreachable' as const, pool: poolStats() });
     }
   });
 }

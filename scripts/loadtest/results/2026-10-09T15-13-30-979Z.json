@@ -1,0 +1,54 @@
+{
+  "startedAt": "2026-10-09T15:13:30.979Z",
+  "base": "http://127.0.0.1:4200",
+  "users": 200,
+  "duration": 60,
+  "rate": 6,
+  "registered": 200,
+  "registerErrors": {},
+  "setupErrors": {},
+  "conversations": 100,
+  "sockets": {
+    "opened": 200,
+    "closed": 0,
+    "reconnects": 0,
+    "errors": 0,
+    "openAfterConnect": 200
+  },
+  "sends": {
+    "ok": 1074,
+    "failed": 0,
+    "timeouts": 0,
+    "errors": {},
+    "p50": 1199,
+    "p95": 2063,
+    "p99": 2403,
+    "max": 2559,
+    "perSecond": 15
+  },
+  "hints": {
+    "expected": 1074,
+    "received": 1074,
+    "p50": 1778,
+    "p95": 2750,
+    "p99": 3166,
+    "max": 3324
+  },
+  "fetch": {
+    "calls": 1278,
+    "errors": {
+      "429 The server is busy. Please try again shortly.": 955
+    },
+    "rows": 2148,
+    "duplicates": 0,
+    "outOfOrder": 0,
+    "missing": 0,
+    "p50": 472,
+    "p95": 1095,
+    "p99": 1577,
+    "max": 1855
+  },
+  "registerSeconds": 14.699,
+  "setupSeconds": 43.778,
+  "trafficSeconds": 71.406
+}

@@ -45,6 +45,9 @@
     "typecheck": "tsc --noEmit",
     "doctor": "expo-doctor",
     "licenses": "node scripts/generate-licenses.mjs",
+    "native:build": "cd modules/mls-core/rust && cargo ndk -t arm64-v8a -t x86_64 -o ../android/src/main/jniLibs build --release",
+    "native:bindings": "cd modules/mls-core/rust && cargo run --release --features uniffi/cli --bin uniffi-bindgen -- generate --library target/x86_64-linux-android/release/libmls_core.so --language kotlin --out-dir ../android/src/main/java && cargo run --release --features uniffi/cli --bin uniffi-bindgen -- generate --library target/x86_64-linux-android/release/libmls_core.so --language swift --out-dir ../ios/generated",
+    "native:test": "cd modules/mls-core/rust && cargo test --release",
     "test": "node --test \"src/**/*.test.ts\""
   },
   "private": true

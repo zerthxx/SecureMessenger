@@ -3,7 +3,7 @@
     "name": "Secure Messenger",
     "slug": "zerth",
     "scheme": "securemessenger",
-    "version": "0.9.0",
+    "version": "0.10.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "com.securemessenger.app",
-      "versionCode": 9,
+      "versionCode": 10,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",

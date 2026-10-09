@@ -1,9 +1,11 @@
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
-import { pool } from './db/client.js';
+import { pool, setPoolErrorLogger } from './db/client.js';
 import { sessions } from './realtime/instance.js';
 
 const app = buildApp();
+// A lost idle database connection is logged here, not fatal (see db/client.ts).
+setPoolErrorLogger(app.log);
 
 const SESSION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 let sessionSweepTimer: ReturnType<typeof setInterval> | null = null;

@@ -5,6 +5,7 @@ import {
   backoffDelayMs,
   HttpStatusError,
   isRetryable,
+  isRetryableApiFailure,
   isTransientStatus,
   RequestTimeoutError,
   statusOf,
@@ -117,5 +118,33 @@ describe('trying several download sources', () => {
       ),
     );
     assert.equal(calls, 8);
+  });
+});
+
+describe('deciding whether to send again automatically', () => {
+  /** The shape @trpc/client gives a failed call: `data` only when the server itself answered. */
+  const trpcError = (data: { code: string; httpStatus?: number } | null, message = 'x', cause?: Error) =>
+    Object.assign(new Error(message), { name: 'TRPCClientError', data, cause });
+
+  test('no answer at all, a timeout, a server error or a rate limit: worth another try', () => {
+    assert.equal(isRetryableApiFailure(new RequestTimeoutError()), true);
+    assert.equal(isRetryableApiFailure(trpcError(null, 'Network request failed', new TypeError('Network request failed'))), true);
+    assert.equal(isRetryableApiFailure(trpcError(null, 'Unexpected token < in JSON')), true);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'INTERNAL_SERVER_ERROR', httpStatus: 500 })), true);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'TOO_MANY_REQUESTS', httpStatus: 429 })), true);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'TIMEOUT', httpStatus: 408 })), true);
+    assert.equal(isRetryableApiFailure(new HttpStatusError(503, 'unavailable')), true);
+    assert.equal(isRetryableApiFailure(new TypeError('Network request failed')), true);
+  });
+
+  test("the server's own refusal, and the app's own logic errors, are final", () => {
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'CONFLICT', httpStatus: 409 }, 'STALE_GROUP_GENERATION')), false);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'FORBIDDEN', httpStatus: 403 })), false);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'UNAUTHORIZED', httpStatus: 401 })), false);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'BAD_REQUEST', httpStatus: 400 })), false);
+    assert.equal(isRetryableApiFailure(trpcError({ code: 'PRECONDITION_FAILED', httpStatus: 412 })), false);
+    assert.equal(isRetryableApiFailure(new HttpStatusError(404, 'gone')), false);
+    assert.equal(isRetryableApiFailure(new Error('This conversation is not ready to send messages yet.')), false);
+    assert.equal(isRetryableApiFailure(new Error('Signed out before this could finish.')), false);
   });
 });

@@ -42,10 +42,21 @@ export const RAILWAY_TRUST_PROXY = '100.0.0.0/8,loopback,linklocal,uniquelocal';
  * (`loopback`, `linklocal`, `uniquelocal`), which is the recommended
  * form.
  */
-export function resolveTrustProxy(raw: string | undefined, production: boolean): boolean | number | string {
+export function resolveTrustProxy(raw: string | undefined, production: boolean): boolean | string {
   const value = (raw ?? (production ? RAILWAY_TRUST_PROXY : 'false')).trim();
   if (value === '' || value.toLowerCase() === 'false') return false;
   if (value.toLowerCase() === 'true') return true;
-  if (/^\d+$/.test(value)) return Number(value);
+  // A bare hop count used to be accepted. Since fastify 5.12 a numeric
+  // `trustProxy` trusts nothing at all (a hop count cannot validate the
+  // immediate peer, so direct clients could spoof X-Forwarded-* by padding
+  // it), and its types no longer allow one. Fail closed explicitly here,
+  // so the misconfiguration is reported (see app.ts) instead of silently
+  // collapsing every per-IP limit into one bucket.
+  if (/^\d+$/.test(value)) return false;
   return value;
+}
+
+/** Whether TRUST_PROXY was given as a hop count, which is no longer honoured (see resolveTrustProxy). */
+export function isHopCountTrustProxy(raw: string | undefined): boolean {
+  return /^\d+$/.test((raw ?? '').trim());
 }

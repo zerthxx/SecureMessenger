@@ -1,0 +1,54 @@
+{
+  "startedAt": "2026-10-09T14:50:09.292Z",
+  "base": "http://127.0.0.1:4200",
+  "users": 100,
+  "duration": 60,
+  "rate": 6,
+  "registered": 0,
+  "registerErrors": {
+    "connect ECONNREFUSED 127.0.0.1:4200": 100
+  },
+  "setupErrors": {},
+  "conversations": 0,
+  "sockets": {
+    "opened": 0,
+    "closed": 0,
+    "reconnects": 0,
+    "errors": 0,
+    "openAfterConnect": 0
+  },
+  "sends": {
+    "ok": 0,
+    "failed": 0,
+    "timeouts": 0,
+    "errors": {},
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "perSecond": 0
+  },
+  "hints": {
+    "expected": 0,
+    "received": 0,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null
+  },
+  "fetch": {
+    "calls": 0,
+    "errors": {},
+    "rows": 0,
+    "duplicates": 0,
+    "outOfOrder": 0,
+    "missing": 0,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null
+  },
+  "registerSeconds": 0.019,
+  "setupSeconds": 0,
+  "trafficSeconds": 0
+}

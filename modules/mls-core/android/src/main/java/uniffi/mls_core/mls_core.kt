@@ -688,6 +688,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_encrypt_message(
     ): Int
+    external fun uniffi_mls_core_checksum_func_generate_blob_key(
+    ): Int
     external fun uniffi_mls_core_checksum_func_generate_device_credential(
     ): Int
     external fun uniffi_mls_core_checksum_func_generate_identity_key(
@@ -702,11 +704,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_mls_core_checksum_func_join_group_replacing(
     ): Int
+    external fun uniffi_mls_core_checksum_func_open_blob(
+    ): Int
     external fun uniffi_mls_core_checksum_func_open_call_signal(
     ): Int
     external fun uniffi_mls_core_checksum_func_pending_decrypted_ids(
     ): Int
     external fun uniffi_mls_core_checksum_func_rebuild_group(
+    ): Int
+    external fun uniffi_mls_core_checksum_func_seal_blob(
     ): Int
     external fun uniffi_mls_core_checksum_func_seal_call_signal(
     ): Int
@@ -739,6 +745,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_encrypt_message(`groupId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_generate_blob_key(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_generate_device_credential(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_generate_identity_key(uniffi_out_err: UniffiRustCallStatus, 
@@ -753,11 +761,15 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_join_group_replacing(`welcomeBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_open_blob(`key`: RustBuffer.ByValue,`sealed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_open_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`sealed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_pending_decrypted_ids(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_rebuild_group(`groupId`: RustBuffer.ByValue,`keyPackages`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_mls_core_fn_func_seal_blob(`key`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_mls_core_fn_func_seal_call_signal(`groupId`: RustBuffer.ByValue,`callId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -904,6 +916,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_mls_core_checksum_func_encrypt_message() != 41753) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_mls_core_checksum_func_generate_blob_key() != 48063) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_generate_device_credential() != 73) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -925,6 +940,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_mls_core_checksum_func_join_group_replacing() != 48888) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_mls_core_checksum_func_open_blob() != 37019) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_mls_core_checksum_func_open_call_signal() != 36499) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -932,6 +950,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_rebuild_group() != 44606) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_mls_core_checksum_func_seal_blob() != 51012) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_mls_core_checksum_func_seal_call_signal() != 7720) {
@@ -1845,6 +1866,23 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
     
 
         /**
+         * A fresh random content key for one media blob (a voice clip) — see
+         * blob.rs for why clips are no longer MLS application messages. The key
+         * is message content: the app carries it inside the clip's envelope (an
+         * MLS application message) and caches it with the decrypted message.
+         * Independent of the open stores, so it works before `initialize`.
+         */ fun `generateBlobKey`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_generate_blob_key(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
          * Generates this device's MLS credential key if one doesn't already
          * exist, cross-signed by the account identity key from
          * [`generate_identity_key`] (which must have been called first, even
@@ -2001,6 +2039,23 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
     
 
         /**
+         * Opens a blob from [`seal_blob`]. `InvalidCiphertext` — never partial
+         * output — for anything tampered with or sealed under another key.
+         */
+    @Throws(MlsCoreException::class) fun `openBlob`(`key`: kotlin.ByteArray, `sealed`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_open_blob(
+    
+        
+        FfiConverterByteArray.lower(`key`),
+        FfiConverterByteArray.lower(`sealed`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Opens a payload from [`seal_call_signal`] sealed by another member of the
          * group for the same call. `InvalidCiphertext` — never partial output — for
          * anything tampered with or sealed for a different call, group, or epoch.
@@ -2049,6 +2104,23 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
         
         FfiConverterByteArray.lower(`groupId`),
         FfiConverterSequenceByteArray.lower(`keyPackages`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Seals a media blob under a key from [`generate_blob_key`]
+         * (AES-256-GCM, fresh nonce). Only the sealed bytes go to the server.
+         */
+    @Throws(MlsCoreException::class) fun `sealBlob`(`key`: kotlin.ByteArray, `plaintext`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(MlsCoreException) { _status ->
+    UniffiLib.uniffi_mls_core_fn_func_seal_blob(
+    
+        
+        FfiConverterByteArray.lower(`key`),
+        FfiConverterByteArray.lower(`plaintext`),_status)
 }
     )
     }

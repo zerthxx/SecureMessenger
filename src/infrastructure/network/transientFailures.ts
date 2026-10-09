@@ -53,6 +53,29 @@ export function isRetryable(err: unknown): boolean {
   return status === null || isTransientStatus(status);
 }
 
+/** tRPC error codes the server answers with for conditions that pass on their own. */
+const TRANSIENT_TRPC_CODES = new Set(['TIMEOUT', 'TOO_MANY_REQUESTS', 'INTERNAL_SERVER_ERROR', 'BAD_GATEWAY', 'SERVICE_UNAVAILABLE', 'GATEWAY_TIMEOUT']);
+
+/**
+ * Whether a failed API call (a tRPC call, or a plain fetch) is worth making
+ * again by itself, unlike `isRetryable`, which is for download sources and
+ * treats any status-less error as transient. Here only a genuine transport
+ * failure counts as one: a tRPC client error carries `data` exactly when
+ * the server itself answered, and a server answer is final unless its code
+ * says otherwise. An Error thrown by the app's own logic ("not ready",
+ * "signed out") is never retried.
+ */
+export function isRetryableApiFailure(err: unknown): boolean {
+  if (err instanceof RequestTimeoutError) return true;
+  if (err instanceof HttpStatusError) return isTransientStatus(err.status);
+  if (err instanceof TypeError) return true; // fetch's own "Network request failed"
+  if (!(err instanceof Error) || err.name !== 'TRPCClientError') return false;
+  const data = (err as { data?: { code?: unknown; httpStatus?: unknown } | null }).data;
+  if (!data) return true; // no answer from the API itself: offline, reset, a proxy's error page
+  if (typeof data.httpStatus === 'number') return isTransientStatus(data.httpStatus);
+  return typeof data.code === 'string' && TRANSIENT_TRPC_CODES.has(data.code);
+}
+
 /**
  * Exponential backoff with full jitter, capped: attempt 0 waits up to
  * `baseMs`, attempt 1 up to 2×, … never more than `capMs`. Jitter keeps many

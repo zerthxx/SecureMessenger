@@ -7,9 +7,10 @@ import { z } from 'zod';
 
 import { conversationMembers, conversations, deviceKeyPackages, devices, messages, users } from '../../db/schema.js';
 import { notifyNewMessage } from '../../lib/pushDelivery.js';
+import { resetGroupTestDelayMs, takeDroppedResetResponse } from '../../lib/testHooks.js';
 import { publishConversationUpdated } from '../../realtime/instance.js';
 import type { Context } from '../context.js';
-import { enforceRateLimit, protectedProcedure, router } from '../trpc.js';
+import { enforceRateLimit, protectedProcedure, router, sheddableProcedure } from '../trpc.js';
 
 /**
  * Phase 5D hardening: rejects the call if the *caller's own* device
@@ -55,18 +56,31 @@ const base64Bytes = z.string().refine(
 );
 
 /**
+ * A device that hasn't used the API for this long is treated as gone for
+ * group purposes: a wiped or reinstalled phone never signs out, so its old
+ * row otherwise stays addressable until its session TTL (months) — every
+ * rebuild keeps sending it Welcomes and burning its KeyPackages, and its
+ * dead leaf stays in the group. A live device that comes back later
+ * simply finds itself outside the current group and rebuilds; nothing is
+ * lost for it.
+ */
+export const ADDRESSABLE_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
  * A device other devices may address a Welcome to: signed in (not revoked,
  * refresh token not expired — an expired one can never come back without a
- * new login, which is a new device row) and finished E2EE setup.
- * Previously only `revokedAt` was checked, so a device abandoned without
- * signing out (reinstall, wiped phone) stayed "active" and kept soaking up
- * Welcomes and KeyPackages until its session TTL passed.
+ * new login, which is a new device row), finished E2EE setup, and seen
+ * within ADDRESSABLE_IDLE_MS. Previously only `revokedAt` was checked, so
+ * a device abandoned without signing out (reinstall, wiped phone) stayed
+ * "active" and kept soaking up Welcomes and KeyPackages until its session
+ * TTL passed.
  */
 function isAddressableDevice(now: Date) {
   return and(
     isNull(devices.revokedAt),
     isNotNull(devices.mlsCredentialPublicKey),
     or(isNull(devices.refreshTokenExpiresAt), gt(devices.refreshTokenExpiresAt, now)),
+    gt(devices.lastSeenAt, new Date(now.getTime() - ADDRESSABLE_IDLE_MS)),
   );
 }
 
@@ -172,7 +186,7 @@ export const e2eeRouter = router({
   registerIdentityKey: protectedProcedure
     .input(z.object({ publicKey: base64Bytes }))
     .mutation(async ({ ctx, input }) => {
-      enforceRateLimit(`e2ee:registerIdentityKey:device:${ctx.device.id}`, 10, 60 * 60 * 1000);
+      enforceRateLimit(`e2ee:registerIdentityKey:device:${ctx.device.id}`, 60, 60 * 60 * 1000);
       await assertCallerDeviceActive(ctx);
 
       await ctx.db
@@ -193,7 +207,7 @@ export const e2eeRouter = router({
   registerDeviceCredential: protectedProcedure
     .input(z.object({ credentialPublicKey: base64Bytes, crossSignature: base64Bytes }))
     .mutation(async ({ ctx, input }) => {
-      enforceRateLimit(`e2ee:registerDeviceCredential:device:${ctx.device.id}`, 10, 60 * 60 * 1000);
+      enforceRateLimit(`e2ee:registerDeviceCredential:device:${ctx.device.id}`, 60, 60 * 60 * 1000);
       await assertCallerDeviceActive(ctx);
 
       await ctx.db
@@ -398,7 +412,7 @@ export const e2eeRouter = router({
    * Group conversations (`type: 'group'`) are excluded — out of scope
    * for this phase.
    */
-  listConversations: protectedProcedure.query(async ({ ctx }) => {
+  listConversations: sheddableProcedure.query(async ({ ctx }) => {
     const otherMembers = alias(conversationMembers, 'other_members');
 
     const rows = await ctx.db
@@ -406,6 +420,7 @@ export const e2eeRouter = router({
         conversationId: conversations.id,
         createdAt: conversations.createdAt,
         mlsGeneration: conversations.mlsGeneration,
+        mlsGenerationDeviceId: conversations.mlsGenerationDeviceId,
         otherUserId: users.id,
         otherUsername: users.username,
         otherDisplayName: users.displayName,
@@ -426,6 +441,11 @@ export const e2eeRouter = router({
       // Which generation of the conversation's MLS group is current (see
       // resetGroup); 0 means none yet. Older app versions ignore it.
       groupGeneration: row.mlsGeneration,
+      // Whether the calling device is the one that established it — lets a
+      // device that lost resetGroup's answer (or was killed right after
+      // sending it) find out that its own group is the current one instead
+      // of rebuilding again. Additive; older app versions ignore it.
+      groupBuiltByThisDevice: row.mlsGenerationDeviceId === ctx.device.id,
       otherUser: { id: row.otherUserId, username: row.otherUsername, displayName: row.otherDisplayName },
     }));
   }),
@@ -457,17 +477,33 @@ export const e2eeRouter = router({
     .mutation(async ({ ctx, input }) => {
       // Generous per-device budget matched to a real chat's cadence
       // (bursts of several messages/sec are normal) while still bounding
-      // a scripted flood.
-      enforceRateLimit(`e2ee:sendMessage:device:${ctx.device.id}`, 60, 60 * 1000);
-      await assertCallerDeviceActive(ctx);
+      // a scripted flood. 60/min was reachable by a fast typist sending
+      // one-word messages, and every refusal showed as "Failed to send".
+      enforceRateLimit(`e2ee:sendMessage:device:${ctx.device.id}`, 120, 60 * 1000);
 
-      const [membership] = await ctx.db
-        .select({ userId: conversationMembers.userId })
-        .from(conversationMembers)
-        .where(and(eq(conversationMembers.conversationId, input.conversationId), eq(conversationMembers.userId, ctx.user.id)))
+      // This is the hottest write path, and the database is far from the
+      // API in production (~150 ms per round trip), so a send costs its
+      // number of sequential statements times that. Measured behind a
+      // 150 ms-RTT proxy (scripts/loadtest): 7 statements = ~1.1 s per
+      // send; the shape below is 2 on the happy path (3 for a duplicate or
+      // a stale generation). Same checks, same outcomes, same error codes.
+      //
+      // One statement for both authorization checks: the caller's device
+      // is still active (assertCallerDeviceActive), and the caller is a
+      // member. The device check comes first, as before.
+      const [access] = await ctx.db
+        .select({ revokedAt: devices.revokedAt, memberUserId: conversationMembers.userId })
+        .from(devices)
+        .leftJoin(
+          conversationMembers,
+          and(eq(conversationMembers.conversationId, input.conversationId), eq(conversationMembers.userId, ctx.user.id)),
+        )
+        .where(eq(devices.id, ctx.device.id))
         .limit(1);
-
-      if (!membership) {
+      if (!access || access.revokedAt) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This device has been signed out.' });
+      }
+      if (!access.memberUserId) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Not a member of this conversation.' });
       }
 
@@ -513,20 +549,16 @@ export const e2eeRouter = router({
         }
       }
 
-      // FOR SHARE: concurrent sends don't wait for each other, but resetGroup
-      // (FOR UPDATE) can't move the generation between this check and the
-      // insert — each message lands wholly before or after a group change.
       const ciphertext = Buffer.from(input.ciphertext, 'base64');
       // Idempotent for application messages: the same ciphertext sent again
       // (a network-level retry of this request) gets the original row back
       // instead of a second copy, which every receiver would have failed to
-      // decrypt. Checked before the generation check, so a retry arriving
-      // after a group change still resolves to the original. See schema.ts
-      // `ciphertextSha256`.
+      // decrypt. A retry arriving after a group change still resolves to
+      // the original (see below). See schema.ts `ciphertextSha256`.
       const ciphertextSha256 = input.messageType === 'application' ? createHash('sha256').update(ciphertext).digest() : null;
-      const findOriginal = async (db: Pick<Context['db'], 'select'>) => {
+      const findOriginal = async () => {
         if (!ciphertextSha256) return undefined;
-        const [original] = await db
+        const [original] = await ctx.db
           .select({ id: messages.id, createdAt: messages.createdAt })
           .from(messages)
           .where(and(eq(messages.conversationId, input.conversationId), eq(messages.ciphertextSha256, ciphertextSha256)))
@@ -534,44 +566,55 @@ export const e2eeRouter = router({
         return original ? { ...original, duplicate: true } : undefined;
       };
 
-      const message = await ctx.db.transaction(async (tx) => {
-        const earlier = await findOriginal(tx);
-        if (earlier) return earlier;
+      // Generation check and insert in ONE statement: the row is inserted
+      // only if the conversation is still on the generation the message was
+      // encrypted in (or, for an app version from before generations, on its
+      // first group). FOR SHARE on the conversation row: concurrent sends
+      // don't wait for each other, but resetGroup (FOR UPDATE) can't move
+      // the generation between this check and the insert — each message
+      // lands wholly before or after a group change. (Under READ COMMITTED a
+      // row lock wait re-evaluates the WHERE against the committed row, so a
+      // send that waited for a reset sees the new generation and inserts
+      // nothing.) ON CONFLICT DO NOTHING keeps the idempotency.
+      const generationCondition =
+        input.mlsGeneration !== undefined
+          ? sql`c.mls_generation = ${input.mlsGeneration}::integer`
+          : input.messageType === 'application'
+            ? sql`c.mls_generation <= 1`
+            : sql`true`;
+      // A raw statement's timestamptz comes back as text, unlike the query builder's.
+      const inserted = await ctx.db.execute<{ id: string; created_at: string | Date }>(sql`
+        insert into messages (conversation_id, sender_device_id, recipient_device_id, message_type, ciphertext, ciphertext_sha256, mls_generation)
+        select c.id, ${ctx.device.id}::uuid, ${input.recipientDeviceId ?? null}::uuid, ${input.messageType}::message_type,
+               ${ciphertext}::bytea, ${ciphertextSha256}::bytea, ${input.mlsGeneration ?? null}::integer
+        from conversations c
+        where c.id = ${input.conversationId}::uuid and ${generationCondition}
+        for share
+        on conflict (conversation_id, ciphertext_sha256) do nothing
+        returning id, created_at
+      `);
+      const row = inserted.rows[0];
+      // Nothing inserted: an identical send already stored (possibly
+      // concurrently, possibly before a group change), or the generation
+      // didn't match.
+      const message = row ? { id: row.id, createdAt: new Date(row.created_at), duplicate: false } : await findOriginal();
 
-        const [conversation] = await tx
+      if (!message) {
+        const [conversation] = await ctx.db
           .select({ mlsGeneration: conversations.mlsGeneration })
           .from(conversations)
           .where(eq(conversations.id, input.conversationId))
-          .for('share');
-        if (input.mlsGeneration !== undefined) {
-          if (!conversation || conversation.mlsGeneration !== input.mlsGeneration) {
-            throw new TRPCError({ code: 'CONFLICT', message: STALE_GROUP_GENERATION });
-          }
-        } else if (input.messageType === 'application' && conversation && conversation.mlsGeneration > 1) {
+          .limit(1);
+        if (input.mlsGeneration !== undefined && (!conversation || conversation.mlsGeneration !== input.mlsGeneration)) {
+          throw new TRPCError({ code: 'CONFLICT', message: STALE_GROUP_GENERATION });
+        }
+        if (input.messageType === 'application' && conversation && conversation.mlsGeneration > 1) {
           // An app version from before generations, writing into a group
           // this conversation has already replaced: nobody could decrypt
           // it. Refusing makes that version show "failed to send" instead
           // of the other side silently getting an unreadable message.
           throw new TRPCError({ code: 'PRECONDITION_FAILED', message: UPDATE_REQUIRED });
         }
-        const [inserted] = await tx
-          .insert(messages)
-          .values({
-            conversationId: input.conversationId,
-            senderDeviceId: ctx.device.id,
-            recipientDeviceId: input.recipientDeviceId ?? null,
-            messageType: input.messageType,
-            ciphertext,
-            ciphertextSha256,
-            mlsGeneration: input.mlsGeneration ?? null,
-          })
-          .onConflictDoNothing({ target: [messages.conversationId, messages.ciphertextSha256] })
-          .returning({ id: messages.id, createdAt: messages.createdAt });
-        // Nothing inserted: an identical send committed concurrently.
-        return inserted ? { ...inserted, duplicate: false } : findOriginal(tx);
-      });
-
-      if (!message) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to store message.' });
       }
       if (message.duplicate) {
@@ -604,7 +647,7 @@ export const e2eeRouter = router({
    * specifically to the caller's current device. Never returns another
    * device's addressed Welcome.
    */
-  fetchMessages: protectedProcedure.input(fetchMessagesInput).query(async ({ ctx, input }) => {
+  fetchMessages: sheddableProcedure.input(fetchMessagesInput).query(async ({ ctx, input }) => {
     // Read-only and legitimately polled at a decent cadence by clients
     // without a push/websocket channel yet — generous ceiling, mainly to
     // blunt scripted hammering rather than shape normal usage. Not
@@ -768,7 +811,7 @@ export const e2eeRouter = router({
    * device, ever, so a device that had been added to enough conversations
    * (or failed attempts) could never be added to another one.
    */
-  keyPackageStatus: protectedProcedure.query(async ({ ctx }) => {
+  keyPackageStatus: sheddableProcedure.query(async ({ ctx }) => {
     const [row] = await ctx.db
       .select({ available: sql<number>`count(*)::int` })
       .from(deviceKeyPackages)
@@ -818,6 +861,12 @@ export const e2eeRouter = router({
       const recipientDeviceIds = [...new Set(input.recipientDeviceIds)];
       if (recipientDeviceIds.includes(ctx.device.id)) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'A device does not send itself a Welcome.' });
+      }
+
+      // Fault injection for local multi-device test runs only (no-op in production) — see lib/testHooks.ts.
+      if (resetGroupTestDelayMs() > 0) {
+        ctx.log.warn({ delayMs: resetGroupTestDelayMs() }, 'TEST HOOK: delaying resetGroup');
+        await new Promise((resolve) => setTimeout(resolve, resetGroupTestDelayMs()));
       }
 
       const result = await ctx.db.transaction(async (tx) => {
@@ -874,6 +923,12 @@ export const e2eeRouter = router({
         return { ok: true as const, generation };
       });
 
+      if (result.ok && takeDroppedResetResponse()) {
+        // The group IS established; only the answer is lost (see lib/testHooks.ts).
+        ctx.log.warn({ conversationId: input.conversationId, generation: result.generation }, 'TEST HOOK: dropping resetGroup response');
+        ctx.res.raw.socket?.destroy();
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'TEST HOOK: response dropped' });
+      }
       if (result.ok) {
         ctx.log.info(
           { conversationId: input.conversationId, generation: result.generation, recipients: recipientDeviceIds.length },

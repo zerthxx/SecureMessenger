@@ -6,6 +6,7 @@ import { base64ToBytes, bytesToBase64 } from '@/infrastructure/crypto/base64';
 import {
   coversOtherMembers,
   classifyMlsError,
+  findPendingSendForRow,
   isFromOwnAccount,
   isPermanentWelcomeFailure,
   isStaleGenerationError,
@@ -14,8 +15,10 @@ import {
   pickWelcome,
   planRow,
   rebuildReason,
+  rebuildStillApplies,
   rebuildTargets,
   rebuildWasAccepted,
+  resolveRebuildCandidate,
   sawUnusableGroup,
   signedOutMemberKeys,
   type ConversationDevice,
@@ -26,18 +29,25 @@ import {
   deleteGroup,
   encryptMessage,
   ensureMlsCoreInitialized,
+  generateBlobKey,
   generateDeviceCredential,
   generateIdentityKey,
   generateKeyPackages,
   groupMemberSignatureKeys,
   joinGroupReplacing,
+  openBlob,
   pendingDecryptedIds,
   rebuildGroup,
+  sealBlob,
 } from '@/infrastructure/crypto/mlsCore';
 import { uuidToBytes } from '@/infrastructure/crypto/uuid';
+import { buildVoiceEnvelope, parseVoiceEnvelope } from '@/infrastructure/media/voiceEnvelope';
+import { nextPollDelayMs } from '@/infrastructure/network/pollSchedule';
+import { backoffDelayMs, isRetryableApiFailure } from '@/infrastructure/network/transientFailures';
 import { e2eeApi, getApiErrorMessage, usersApi } from '@/infrastructure/network/trpcClient';
 import { downloadVoiceBlob, uploadVoiceBlob } from '@/infrastructure/network/voiceMediaApi';
 import {
+  clearRebuildCandidate,
   deleteAppState,
   downloadedVoiceMediaIds,
   failInterruptedSends,
@@ -46,10 +56,12 @@ import {
   getLocalGroupGeneration,
   getMessageById,
   getMessageStoreOwner,
+  getRebuildCandidate,
   getStoredMessageStates,
   getSyncCursor,
   initMessageStore,
   listLocalConversations,
+  listPendingOutgoingIds,
   reconcileSentMessageId,
   recordMessage,
   refreshConversationPreview,
@@ -57,8 +69,9 @@ import {
   setAppState,
   setLocalGroupGeneration,
   setMessageStoreOwner,
+  setRebuildCandidate,
   setSyncCursor,
-  setVoiceMediaId,
+  setVoiceBlob,
   updateMessageCreatedAt,
   updateMessageStatus,
   updateVoiceAudio,
@@ -79,9 +92,10 @@ const KEY_PACKAGE_BATCH_SIZE = 20;
  * eventually became impossible to add to any conversation.
  */
 const KEY_PACKAGE_LOW_WATER = 10;
+/** The first wait between chat-list polls while the realtime socket is down; each quiet poll doubles it (see pollSchedule.ts). */
 const CONVERSATIONS_POLL_MS = 6000;
-/** With the realtime socket connected, only every Nth list poll runs (30 s): changes arrive as hints instead. */
-const ONLINE_POLL_EVERY = 5;
+/** The wait with the socket connected (changes arrive as hints instead), and the cap while it is down. */
+const ONLINE_POLL_MS = 30_000;
 /** How often a conversation's group membership is compared with its members' signed-in devices. */
 const MEMBERSHIP_CHECK_MS = 5 * 60 * 1000;
 
@@ -132,6 +146,21 @@ async function recoverInterruptedReceives(owner: string): Promise<void> {
   }
 }
 
+/** The ciphertext an unconfirmed send sealed, and the generation it was sealed for (see sealOnce). */
+function readPendingCiphertext(owner: string, localId: string): { generation: number; ciphertext: string } | null {
+  const saved = getAppState(pendingCiphertextKey(owner, localId));
+  if (!saved) return null;
+  try {
+    const parsed = JSON.parse(saved) as { generation?: unknown; ciphertext?: unknown };
+    if (typeof parsed.generation === 'number' && typeof parsed.ciphertext === 'string') {
+      return { generation: parsed.generation, ciphertext: parsed.ciphertext };
+    }
+  } catch {
+    // unreadable: as good as none
+  }
+  return null;
+}
+
 /**
  * The ciphertext to send for one outgoing message in `generation`: the one
  * its first attempt encrypted, when there is one for that generation. A
@@ -143,20 +172,44 @@ async function recoverInterruptedReceives(owner: string): Promise<void> {
  * old ciphertext anyway. Cleared when the send is confirmed.
  */
 async function sealOnce(owner: string, localId: string, generation: number, encrypt: () => Promise<Uint8Array>): Promise<string> {
-  const key = pendingCiphertextKey(owner, localId);
-  const saved = getAppState(key);
-  if (saved) {
-    try {
-      const parsed = JSON.parse(saved) as { generation?: unknown; ciphertext?: unknown };
-      if (parsed.generation === generation && typeof parsed.ciphertext === 'string') return parsed.ciphertext;
-    } catch {
-      // unreadable: encrypt again
-    }
-  }
+  const saved = readPendingCiphertext(owner, localId);
+  if (saved && saved.generation === generation) return saved.ciphertext;
   const ciphertext = bytesToBase64(await encrypt());
   if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
-  setAppState(key, JSON.stringify({ generation, ciphertext }));
+  setAppState(pendingCiphertextKey(owner, localId), JSON.stringify({ generation, ciphertext }));
   return ciphertext;
+}
+
+/** The conversation's group changed between a send reading its generation and encrypting; the send starts over (see encryptAndSend). */
+class GroupChangedError extends Error {
+  constructor() {
+    super('The conversation changed while this message was being prepared.');
+  }
+}
+
+/**
+ * `encryptMessage` for a send tagged `generation`, refused if the local
+ * generation no longer reads `generation` at the moment the native call is
+ * dispatched. A send reads the generation, then may await (a voice clip's
+ * upload) before encrypting; a rebuild or join in between replaces the
+ * native group, and encrypting then would produce bytes tagged with one
+ * generation but readable only in another — which every other device
+ * records as "Unable to decrypt", for good. The native module runs calls
+ * in dispatch order, so a call dispatched while the label still reads
+ * `generation` encrypts with that generation's group.
+ */
+async function encryptForGeneration(owner: string, conversationId: string, generation: number, plaintext: string): Promise<Uint8Array> {
+  if (getLocalGroupGeneration(owner, conversationId) !== generation) throw new GroupChangedError();
+  return encryptMessage(owner, uuidToBytes(conversationId), plaintext);
+}
+
+/** Delays between automatic retries of a send that failed for a passing reason (no answer, timeout, 5xx, rate limit); jittered. */
+const SEND_RETRY_BASE_MS = 2000;
+const SEND_RETRY_CAP_MS = 8000;
+const SEND_RETRIES = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function sameConversationList(a: Conversation[], b: Conversation[]): boolean {
@@ -177,50 +230,6 @@ function sameConversationList(a: Conversation[], b: Conversation[]): boolean {
       );
     })
   );
-}
-
-/**
- * Voice-message metadata travels through the exact same protected
- * message path as text (`encryptMessage`/`sendMessage`/`fetchMessages`/
- * `decryptMessage` — see mlsCore.ts) as a small JSON envelope, prefixed
- * so it can never be confused with genuine user-typed text (no real chat
- * message starts with a NUL-adjacent control-free ASCII tag like this by
- * accident, and this app controls both the sender and receiver side of
- * the encoding, so the exact prefix only needs to not collide with itself).
- * The actual audio bytes never travel this path — see `attemptSendVoice`.
- */
-const VOICE_ENVELOPE_PREFIX = 'SMVOICE1:';
-
-interface VoiceEnvelope {
-  mediaId: string;
-  durationMs: number;
-  byteSize: number;
-  mimeType: string;
-}
-
-function buildVoiceEnvelope(envelope: VoiceEnvelope): string {
-  return VOICE_ENVELOPE_PREFIX + JSON.stringify(envelope);
-}
-
-function parseVoiceEnvelope(plaintext: string): VoiceEnvelope | null {
-  if (!plaintext.startsWith(VOICE_ENVELOPE_PREFIX)) return null;
-  try {
-    const parsed: unknown = JSON.parse(plaintext.slice(VOICE_ENVELOPE_PREFIX.length));
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      typeof (parsed as VoiceEnvelope).mediaId === 'string' &&
-      typeof (parsed as VoiceEnvelope).durationMs === 'number' &&
-      typeof (parsed as VoiceEnvelope).byteSize === 'number' &&
-      typeof (parsed as VoiceEnvelope).mimeType === 'string'
-    ) {
-      return parsed as VoiceEnvelope;
-    }
-  } catch {
-    // Not a (parseable) voice envelope — never thrown further; the
-    // caller falls back to treating this as an ordinary text message.
-  }
-  return null;
 }
 
 /** A group (re)build that couldn't include the other person: they have no device ready to receive encrypted messages. */
@@ -363,13 +372,24 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
         }
 
         const identity = await generateIdentityKey();
-        await e2eeApi.registerIdentityKey({ publicKey: bytesToBase64(identity.publicKey) });
-
         const credential = await generateDeviceCredential();
-        await e2eeApi.registerDeviceCredential({
-          credentialPublicKey: bytesToBase64(credential.credentialPublicKey),
-          crossSignature: bytesToBase64(credential.crossSignature),
-        });
+        // Both registrations are set-once on the server, so once this
+        // login's device row has them there is nothing to send again. They
+        // used to be sent on every launch, and each counts against a small
+        // per-device budget — an app restarted a few times in an hour was
+        // refused with "Too many attempts" and lost encrypted messaging
+        // until the window passed. The flag is per device row (a new login
+        // is a new row, which must register again) and only set after the
+        // server accepted both.
+        const registeredKey = `e2eeRegistered:${user.id}:${deviceId}`;
+        if (getAppState(registeredKey) !== '1') {
+          await e2eeApi.registerIdentityKey({ publicKey: bytesToBase64(identity.publicKey) });
+          await e2eeApi.registerDeviceCredential({
+            credentialPublicKey: bytesToBase64(credential.credentialPublicKey),
+            crossSignature: bytesToBase64(credential.crossSignature),
+          });
+          if (getMessageStoreOwner() === user.id) setAppState(registeredKey, '1');
+        }
         ownCredentialKeyRef.current = bytesToBase64(credential.credentialPublicKey);
 
         await topUpKeyPackages();
@@ -390,16 +410,19 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   }, [deviceId, user, topUpKeyPackages]);
 
   /**
-   * Fetches and decrypts a received voice message's audio blob and caches
-   * the decrypted bytes to a local file. The blob is MLS ciphertext from
-   * the same sender, sent just before the envelope that references it, so
-   * it has to be decrypted soon after the envelope: MLS keeps only a few
-   * skipped message keys per sender, and none once the conversation moves
-   * to a newer group. `syncConversation` therefore calls this right after
-   * recording a voice envelope; tapping a message whose audio couldn't be
-   * fetched then (offline) retries it. Decrypting the same ciphertext twice
-   * is not possible, so a message already downloading or downloaded is left
-   * alone.
+   * Fetches and opens a received voice message's audio blob and caches the
+   * audio to a local file. The blob is sealed under the content key its
+   * envelope carried (see voiceEnvelope.ts / rust/src/blob.rs), so when it
+   * is fetched doesn't matter: right after the envelope (what
+   * `syncConversation` does), or whenever the user taps a message whose
+   * audio couldn't be fetched then (offline). A message already downloading
+   * or downloaded is left alone.
+   *
+   * Legacy: a clip from an app version before content keys has no key; it
+   * is MLS ciphertext from the same sender, decryptable only through the
+   * group and only while the sender's key is still kept (MLS keeps a few
+   * skipped keys per sender, none once the conversation moves to a newer
+   * group). Decrypting one twice is not possible, hence decryptMessageOnce.
    */
   const fetchVoiceAudio = useCallback(async (owner: string, conversationId: string, messageId: string): Promise<void> => {
     const row = getMessageById(owner, messageId);
@@ -412,15 +435,21 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     try {
       const blobCiphertext = await downloadVoiceBlob(conversationId, row.audioMediaId);
       if (getMessageStoreOwner() !== owner) return;
-      // Crash-safe like the messages themselves (see syncConversation): a
-      // download interrupted after decrypting can decrypt again.
-      const blobRowId = voiceBlobRowId(row.audioMediaId);
-      const base64Audio = await decryptMessageOnce(owner, uuidToBytes(conversationId), blobRowId, blobCiphertext);
+      let audio: Uint8Array;
+      let legacyRowId: string | null = null;
+      if (row.audioKey) {
+        audio = await openBlob(base64ToBytes(row.audioKey), blobCiphertext);
+      } else {
+        // Crash-safe like the messages themselves (see syncConversation): a
+        // download interrupted after decrypting can decrypt again.
+        legacyRowId = voiceBlobRowId(row.audioMediaId);
+        audio = base64ToBytes(await decryptMessageOnce(owner, uuidToBytes(conversationId), legacyRowId, blobCiphertext));
+      }
       if (getMessageStoreOwner() !== owner) return;
-      const uri = writeDownloadedAudio(owner, conversationId, row.audioMediaId, base64ToBytes(base64Audio));
+      const uri = writeDownloadedAudio(owner, conversationId, row.audioMediaId, audio);
       if (getMessageStoreOwner() !== owner) return;
       updateVoiceAudio(owner, messageId, { audioLocalUri: uri, audioState: 'downloaded' });
-      await ackDecrypted(owner, [blobRowId]).catch(() => {});
+      if (legacyRowId) await ackDecrypted(owner, [legacyRowId]).catch(() => {});
     } catch {
       if (getMessageStoreOwner() !== owner) return;
       updateVoiceAudio(owner, messageId, { audioState: 'failed' });
@@ -525,6 +554,11 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           changed = true;
         };
 
+        // This device's unconfirmed sends (still under local ids), read only
+        // once a row this device sent turns up that isn't stored: such a
+        // row may be a send whose response was lost. See findPendingSendForRow.
+        let pendingSends: { localId: string; ciphertext: string }[] | null = null;
+
         rowLoop: for (const row of rows) {
           if (getMessageStoreOwner() !== owner) return null;
 
@@ -536,6 +570,23 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           if (row.messageType === 'application' && (!existing || existing.status === 'sending')) {
             const fresh = getMessageById(owner, row.id);
             existing = fresh ? { status: fresh.status, createdAt: fresh.createdAt } : null;
+          }
+
+          if (row.messageType === 'application' && row.senderDeviceId === deviceId && !existing) {
+            pendingSends ??= listPendingOutgoingIds(owner, conversationId).flatMap((localId) => {
+              const sealed = readPendingCiphertext(owner, localId);
+              return sealed ? [{ localId, ciphertext: sealed.ciphertext }] : [];
+            });
+            const localId = findPendingSendForRow(row.ciphertext, pendingSends);
+            if (localId) {
+              // The server has it: confirm the local row in place (its own
+              // plaintext stays), exactly as the lost response would have.
+              reconcileSentMessageId(owner, localId, row.id, row.createdAt);
+              deleteAppState(pendingCiphertextKey(owner, localId));
+              pendingSends = pendingSends.filter((send) => send.localId !== localId);
+              changed = true;
+              continue rowLoop;
+            }
           }
 
           const action = planRow(row, {
@@ -552,6 +603,8 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
                 await joinGroupReplacing(owner, base64ToBytes(row.ciphertext));
                 if (getMessageStoreOwner() !== owner) return null;
                 setLocalGroupGeneration(owner, conversationId, row.mlsGeneration);
+                // A rebuild this device had started is superseded by the group it just joined.
+                clearRebuildCandidate(owner, conversationId);
                 localGeneration = row.mlsGeneration;
               } catch (err) {
                 if (getMessageStoreOwner() !== owner) return null;
@@ -647,6 +700,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
                 audioMediaId: voiceEnvelope?.mediaId ?? null,
                 audioDurationMs: voiceEnvelope?.durationMs ?? null,
                 audioState: voiceEnvelope ? 'idle' : null,
+                audioKey: voiceEnvelope?.key ?? null,
                 createdAt: row.createdAt,
                 localCreatedAt: row.createdAt,
               });
@@ -740,8 +794,47 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       }
       await consumeFor(targets.filter((device) => device.userId === owner));
 
+      // Everything the server holds for the current group is read and
+      // decrypted now, right before that group is deleted by the native
+      // rebuild: the device listing and KeyPackage round trips above took
+      // time, and a message the other side sent meanwhile would otherwise
+      // be lost for this device (grey "not available"). If this sync joined
+      // a newer Welcome, the prepared rebuild is for a replaced group and is
+      // abandoned (see groupSync.rebuildStillApplies).
+      const localGenerationBeforeSync = getLocalGroupGeneration(owner, conversationId);
+      await syncConversation(conversationId);
+      requireStillOwner();
+      if (!rebuildStillApplies({ localGenerationBeforeSync, localGenerationAfterSync: getLocalGroupGeneration(owner, conversationId) })) {
+        return false;
+      }
+
       const groupIdBytes = uuidToBytes(conversationId);
-      const rebuilt = await rebuildGroup(owner, groupIdBytes, keyed.map((k) => k.keyPackage));
+      // From here until the server answers, this device's copy of the group
+      // is one the server may never accept. The local generation says so (0):
+      // a send waits for this to finish instead of encrypting (see
+      // encryptAndSend), and a sync treats every row as from a group this
+      // device isn't in rather than decrypting with the wrong keys. The
+      // candidate is noted first, so a lost answer — or the app killed
+      // anywhere in between — can be resolved against the server later
+      // (maintainGroup / resolveRebuildCandidate) instead of leaving a
+      // mislabelled group behind, which showed every message exchanged in
+      // the meantime as "Unable to decrypt".
+      setRebuildCandidate(owner, conversationId, expectedGeneration + 1);
+      setLocalGroupGeneration(owner, conversationId, 0);
+      let rebuilt: Awaited<ReturnType<typeof rebuildGroup>>;
+      try {
+        rebuilt = await rebuildGroup(owner, groupIdBytes, keyed.map((k) => k.keyPackage));
+      } catch (err) {
+        requireStillOwner();
+        const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+        if (text.includes('InvalidInput')) {
+          // Nothing usable to add; the existing copy was left untouched (see
+          // rust/src/group.rs rebuild_group), so its label is restored.
+          clearRebuildCandidate(owner, conversationId);
+          setLocalGroupGeneration(owner, conversationId, expectedGeneration);
+        }
+        throw err;
+      }
       requireStillOwner();
       const recipientDeviceIds = rebuilt.included.flatMap((index) => {
         const entry = keyed[index];
@@ -755,9 +848,10 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           response = await e2eeApi.resetGroup(request);
         } catch (err) {
           // A lost response is retried with the same request: the server
-          // reports whether the first attempt already went through.
+          // reports whether the first attempt already went through. Giving
+          // up leaves the candidate noted for a later sync to resolve.
           if (attempt === 2) throw err;
-          await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+          await sleep(1000 * 2 ** attempt);
         }
       }
       requireStillOwner();
@@ -765,6 +859,7 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
 
       if (rebuildWasAccepted(response, expectedGeneration)) {
         setLocalGroupGeneration(owner, conversationId, expectedGeneration + 1);
+        clearRebuildCandidate(owner, conversationId);
         serverGenerationRef.current.set(conversationId, expectedGeneration + 1);
         membershipCheckedAtRef.current.set(conversationId, Date.now());
         return true;
@@ -772,10 +867,10 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       serverGenerationRef.current.set(conversationId, response.generation);
       await deleteGroup(owner, groupIdBytes);
       requireStillOwner();
-      setLocalGroupGeneration(owner, conversationId, 0);
+      clearRebuildCandidate(owner, conversationId);
       return false;
     },
-    [deviceId],
+    [deviceId, syncConversation],
   );
 
   /**
@@ -793,6 +888,35 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     async (conversationId: string, syncResult: { unusable: boolean }, userInitiated: boolean): Promise<boolean> => {
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return false;
+
+      // A rebuild this device started without seeing the server's answer
+      // (see rebuildConversationGroup): settle it before deciding anything
+      // else, on what the server actually kept.
+      const candidate = getRebuildCandidate(owner, conversationId);
+      if (candidate !== null) {
+        const listed = (await e2eeApi.listConversations()).find((row) => row.conversationId === conversationId);
+        if (getMessageStoreOwner() !== owner || !listed) return false;
+        serverGenerationRef.current.set(conversationId, listed.groupGeneration);
+        const resolution = resolveRebuildCandidate({
+          candidate,
+          localGeneration: getLocalGroupGeneration(owner, conversationId),
+          serverGeneration: listed.groupGeneration,
+          builtByThisDevice: listed.groupBuiltByThisDevice === true,
+        });
+        if (resolution === 'adopt') {
+          setLocalGroupGeneration(owner, conversationId, candidate);
+          clearRebuildCandidate(owner, conversationId);
+          membershipCheckedAtRef.current.set(conversationId, Date.now());
+          applyConversations(listLocalConversations(owner));
+          return true; // the rows of this generation were left unread: sync again
+        }
+        if (resolution === 'discard') {
+          await deleteGroup(owner, uuidToBytes(conversationId));
+          if (getMessageStoreOwner() !== owner) return false;
+        }
+        clearRebuildCandidate(owner, conversationId);
+      }
+
       const localGeneration = getLocalGroupGeneration(owner, conversationId);
       let serverGeneration = serverGenerationRef.current.get(conversationId);
       if (serverGeneration === undefined) {
@@ -926,6 +1050,13 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       });
     }
 
+    // The list is on screen before any group work: the syncs below can take
+    // a while (a rebuild is several round trips, longer on a slow network),
+    // and until they finished a freshly signed-in device showed an empty
+    // chat list — "Tap the compose icon to start an encrypted chat" — for
+    // conversations it already had.
+    applyConversations(listLocalConversations(owner));
+
     // Syncs every conversation this device isn't on the current group of —
     // one someone just started with us, one whose group was rebuilt (a new
     // Welcome is waiting), one this device must rebuild — plus any due a
@@ -989,47 +1120,61 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
     if (status !== 'authenticated' || !e2eeReady) return;
     refreshConversations();
 
-    // Audit fix: this previously polled every CONVERSATIONS_POLL_MS
-    // unconditionally, including while the app is backgrounded — a real,
-    // cumulative battery/network cost with no push/realtime transport in
-    // this app. Pausing the interval while AppState isn't 'active' (and
-    // refreshing once immediately on returning to foreground, so the
-    // list isn't stale on resume) removes that cost with no change to
-    // foreground behavior.
-    let ticks = 0;
-    const poll = () => {
-      ticks += 1;
-      if (realtime.getStatus() === 'online' && ticks % ONLINE_POLL_EVERY !== 0) return;
-      void refreshConversations();
+    // Polls only while the app is in the foreground (an audit fix: polling
+    // while backgrounded was a real, cumulative battery/network cost), with
+    // an immediate refresh on returning so the list isn't stale on resume.
+    //
+    // The wait between polls comes from pollSchedule.ts: a slow, jittered
+    // safety net while the realtime socket delivers hints; while the socket
+    // is down it starts fast and backs off with every quiet poll (6 → 12 →
+    // 24 → 30 s), resetting when the app comes to the foreground. A fixed
+    // cadence turned a realtime outage into a database outage at scale
+    // (docs/ENGINEERING_CHECKLIST.md, S1).
+    let stopped = false;
+    let quietPolls = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer || stopped) return;
+      const delay = nextPollDelayMs({
+        realtimeOnline: realtime.getStatus() === 'online',
+        quietPolls,
+        baseMs: CONVERSATIONS_POLL_MS,
+        onlineMs: ONLINE_POLL_MS,
+      });
+      timer = setTimeout(async () => {
+        timer = null;
+        const online = realtime.getStatus() === 'online';
+        await refreshConversations();
+        if (stopped) return;
+        quietPolls = online ? 0 : quietPolls + 1;
+        if (AppState.currentState === 'active') schedule();
+      }, delay);
     };
-    let interval: ReturnType<typeof setInterval> | null = null;
-    const startInterval = () => {
-      if (interval) return;
-      interval = setInterval(poll, CONVERSATIONS_POLL_MS);
-    };
-    const stopInterval = () => {
-      if (interval) {
-        clearInterval(interval);
-        interval = null;
+    const stop = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
       }
     };
 
-    if (AppState.currentState === 'active') startInterval();
+    if (AppState.currentState === 'active') schedule();
 
     const subscription = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
+        quietPolls = 0;
         refreshConversations();
         // Other people starting chats with this device while it was away
         // use up its KeyPackages too.
         topUpKeyPackages().catch(() => {});
-        startInterval();
+        schedule();
       } else {
-        stopInterval();
+        stop();
       }
     });
 
     return () => {
-      stopInterval();
+      stopped = true;
+      stop();
       subscription.remove();
     };
     // refreshConversations is stable enough (recreated only when
@@ -1145,25 +1290,68 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
    * that group's generation. If the conversation moved to a newer group in
    * the meantime (another device rebuilt it) the server refuses the send
    * rather than storing a message nobody else can read; this device then
-   * syncs (joining the new group) and sends once more, re-encrypted.
+   * syncs (joining the new group) and sends once more, re-encrypted. The
+   * same happens when the group changes under the send locally (a rebuild
+   * or join between reading the generation and encrypting — see
+   * encryptForGeneration). While the local generation is 0 — no group yet,
+   * or a rebuild in progress — the send waits for the conversation's sync
+   * slot (which is where rebuilds run) instead of encrypting for a group
+   * the server may not keep.
+   *
+   * A send that fails for a passing reason (no answer, a timeout, a server
+   * error, a rate limit) is made again a bounded number of times before it
+   * is reported as failed. Safe to repeat: the same ciphertext is sent each
+   * time (sealOnce), so one that did reach the server is answered with the
+   * original message, never stored twice. Resolves to null when the send
+   * was confirmed meanwhile by a sync that found its bytes on the server
+   * (see syncConversation / findPendingSendForRow) — the local row is then
+   * already settled, and nothing more may be encrypted for it, or the
+   * message would be stored a second time.
    */
   const encryptAndSend = useCallback(
-    async (owner: string, conversationId: string, send: (generation: number) => Promise<{ messageId: string; createdAt?: string }>) => {
-      const attempt = () => {
-        const generation = getLocalGroupGeneration(owner, conversationId);
+    async (
+      owner: string,
+      conversationId: string,
+      localId: string,
+      send: (generation: number) => Promise<{ messageId: string; createdAt?: string }>,
+    ): Promise<{ messageId: string; createdAt?: string } | null> => {
+      const attempt = async () => {
+        const row = getMessageById(owner, localId);
+        if (!row || row.status !== 'sending') return null;
+        let generation = getLocalGroupGeneration(owner, conversationId);
+        if (generation === 0) {
+          await runConversationSync(conversationId, true);
+          if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+          if (getMessageById(owner, localId)?.status !== 'sending') return null;
+          generation = getLocalGroupGeneration(owner, conversationId);
+        }
         if (generation === 0) throw new Error('This conversation is not ready to send messages yet.');
         return send(generation);
       };
-      try {
-        return await attempt();
-      } catch (err) {
-        if (!isStaleGenerationError(err)) throw err;
-        await pollConversation(conversationId);
-        if (getMessageStoreOwner() !== owner) throw err;
-        return attempt();
+      let groupRetries = 0;
+      let transientRetries = 0;
+      for (;;) {
+        try {
+          return await attempt();
+        } catch (err) {
+          if (getMessageStoreOwner() !== owner) throw err;
+          if ((isStaleGenerationError(err) || err instanceof GroupChangedError) && groupRetries < 2) {
+            groupRetries += 1;
+            if (isStaleGenerationError(err)) await pollConversation(conversationId);
+            if (getMessageStoreOwner() !== owner) throw err;
+            continue;
+          }
+          if (isRetryableApiFailure(err) && transientRetries < SEND_RETRIES) {
+            await sleep(backoffDelayMs(transientRetries, SEND_RETRY_BASE_MS, SEND_RETRY_CAP_MS));
+            transientRetries += 1;
+            if (getMessageStoreOwner() !== owner) throw err;
+            continue;
+          }
+          throw err;
+        }
       }
     },
-    [pollConversation],
+    [pollConversation, runConversationSync],
   );
 
   /**
@@ -1190,9 +1378,8 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       const owner = getMessageStoreOwner();
       if (!deviceId || !owner) return;
       try {
-        const groupIdBytes = uuidToBytes(conversationId);
-        const { messageId, createdAt } = await encryptAndSend(owner, conversationId, async (generation) => {
-          const ciphertext = await sealOnce(owner, localId, generation, () => encryptMessage(owner, groupIdBytes, text));
+        const sent = await encryptAndSend(owner, conversationId, localId, async (generation) => {
+          const ciphertext = await sealOnce(owner, localId, generation, () => encryptForGeneration(owner, conversationId, generation, text));
           return e2eeApi.sendMessage({
             conversationId,
             ciphertext,
@@ -1201,10 +1388,12 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           });
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
-        // The server's own timestamp when it returns one (older servers
-        // don't), so ordering is right before the next sync confirms it.
-        reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
-        deleteAppState(pendingCiphertextKey(owner, localId));
+        if (sent) {
+          // The server's own timestamp when it returns one (older servers
+          // don't), so ordering is right before the next sync confirms it.
+          reconcileSentMessageId(owner, localId, sent.messageId, sent.createdAt ?? nowIso());
+          deleteAppState(pendingCiphertextKey(owner, localId));
+        }
       } catch {
         if (getMessageStoreOwner() !== owner) return;
         updateMessageStatus(owner, localId, 'failed');
@@ -1225,20 +1414,20 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
   /**
    * Mirrors `attemptSend` exactly (same owner-capture-and-recheck-after-
    * every-await pattern), but for a voice message's two-part send: the
-   * audio blob is encrypted with the SAME `encryptMessage` call used for
-   * ordinary text and uploaded as opaque bytes to the REST media endpoint;
-   * a small JSON envelope (mediaId + duration) is then sent through the
-   * existing `sendMessage` path, exactly like a text message. The local
-   * optimistic row already has `audioLocalUri` pointing at the
+   * audio is sealed under a fresh random content key (see
+   * rust/src/blob.rs) and uploaded as opaque bytes to the REST media
+   * endpoint; a small JSON envelope (mediaId, duration, the key) is then
+   * sent through the existing `sendMessage` path, exactly like a text
+   * message — the MLS-protected envelope is what carries the key. The
+   * local optimistic row already has `audioLocalUri` pointing at the
    * just-recorded file (see `sendVoiceMessage`), so the sender's own
    * bubble is playable immediately — this function's only job is to get
    * the blob+metadata to the server and reconcile the local id.
    *
-   * The blob and its envelope must be encrypted in the same group: an
-   * upload from an earlier attempt is only reused if the conversation is
-   * still on the generation it was encrypted for (`voiceBlobGeneration`);
-   * otherwise nobody in the current group could decrypt it, so it is
-   * encrypted and uploaded again.
+   * The key and the uploaded blob's id are stored on the local row as soon
+   * as each exists, so a retry after a failure between upload and send
+   * reuses the upload instead of leaving it orphaned. Neither depends on
+   * the group's generation: a group change only re-seals the envelope.
    */
   const attemptSendVoiceNow = useCallback(
     async (conversationId: string, localId: string, localFileUri: string, durationMs: number): Promise<void> => {
@@ -1247,32 +1436,33 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
       try {
         const bytes = await readAudioBytes(localFileUri);
         if (getMessageStoreOwner() !== owner) return;
-        const groupIdBytes = uuidToBytes(conversationId);
-        const blobGenerationKey = `voiceBlobGeneration:${owner}:${localId}`;
 
-        const { messageId, createdAt } = await encryptAndSend(owner, conversationId, async (generation) => {
-          // Audit fix: reuse a mediaId from a prior attempt instead of
-          // re-uploading, so a retry after a failure between upload and
-          // send doesn't leave the earlier upload orphaned on the server.
-          let mediaId = getMessageById(owner, localId)?.audioMediaId ?? null;
-          if (mediaId && getAppState(blobGenerationKey) !== String(generation)) {
+        const sent = await encryptAndSend(owner, conversationId, localId, async (generation) => {
+          const row = getMessageById(owner, localId);
+          let mediaId = row?.audioMediaId ?? null;
+          let key = row?.audioKey ?? null;
+          if (!key) {
+            // No key: either a fresh send, or a blob uploaded by an app
+            // version before content keys (an MLS application message a
+            // retry can no longer reference). Either way, seal and upload anew.
             mediaId = null;
-            setVoiceMediaId(owner, localId, null);
+            key = bytesToBase64(await generateBlobKey());
+            if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
+            setVoiceBlob(owner, localId, { mediaId: null, key });
           }
           if (!mediaId) {
-            const blobCiphertext = await encryptMessage(owner, groupIdBytes, bytesToBase64(bytes));
+            const sealed = await sealBlob(base64ToBytes(key), bytes);
             if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
-            const uploaded = await uploadVoiceBlob(conversationId, blobCiphertext);
+            const uploaded = await uploadVoiceBlob(conversationId, sealed);
             if (getMessageStoreOwner() !== owner) throw new Error('Signed out before this could finish.');
             mediaId = uploaded.mediaId;
-            setVoiceMediaId(owner, localId, mediaId);
-            setAppState(blobGenerationKey, String(generation));
+            setVoiceBlob(owner, localId, { mediaId });
           }
 
-          const envelope = buildVoiceEnvelope({ mediaId, durationMs, byteSize: bytes.length, mimeType: 'audio/m4a' });
-          // Same generation means the same uploaded blob (see above), so a
-          // saved envelope still references it.
-          const metadataCiphertext = await sealOnce(owner, localId, generation, () => encryptMessage(owner, groupIdBytes, envelope));
+          const envelope = buildVoiceEnvelope({ mediaId, durationMs, byteSize: bytes.length, mimeType: 'audio/m4a', key });
+          const metadataCiphertext = await sealOnce(owner, localId, generation, () =>
+            encryptForGeneration(owner, conversationId, generation, envelope),
+          );
           return e2eeApi.sendMessage({
             conversationId,
             ciphertext: metadataCiphertext,
@@ -1281,8 +1471,10 @@ export function ChatProvider({ children }: PropsWithChildren): React.JSX.Element
           });
         });
         if (getMessageStoreOwner() !== owner) return; // sent server-side either way; local reconcile only applies under the account that sent it
-        reconcileSentMessageId(owner, localId, messageId, createdAt ?? nowIso());
-        deleteAppState(pendingCiphertextKey(owner, localId));
+        if (sent) {
+          reconcileSentMessageId(owner, localId, sent.messageId, sent.createdAt ?? nowIso());
+          deleteAppState(pendingCiphertextKey(owner, localId));
+        }
       } catch {
         if (getMessageStoreOwner() !== owner) return;
         updateMessageStatus(owner, localId, 'failed');

@@ -1,4 +1,4 @@
-import { createTRPCUntypedClient, httpBatchLink, TRPCClientError } from '@trpc/client';
+import { createTRPCUntypedClient, httpLink, TRPCClientError } from '@trpc/client';
 
 // NOTE ON THIS FILE'S SHAPE — read before "simplifying" it back to
 // createTRPCClient<AppRouter>(): that was the first approach tried here,
@@ -82,9 +82,18 @@ export function getAccessTokenForRequest(): string | null {
  */
 const API_TIMEOUT_MS = 45_000;
 
+/**
+ * `httpLink`, not `httpBatchLink`: the batch link hands each call to a
+ * `setTimeout(dispatch)`, and React Native on Android does not run JS
+ * timers while the app is in the background — so a sync started there (a
+ * realtime "conversation updated" hint still arrives, the socket is event
+ * driven) sent no request at all until the app came back, and a message
+ * received in the background never raised a notification. The app makes
+ * one call at a time anyway, so batching bought nothing.
+ */
 const untypedClient = createTRPCUntypedClient<AppRouter>({
   links: [
-    httpBatchLink({
+    httpLink({
       url: `${API_BASE_URL}/trpc`,
       headers: () => (currentAccessToken ? { authorization: `Bearer ${currentAccessToken}` } : {}),
       fetch: (url, init) => fetchWithTimeout(String(url), init as RequestInit | undefined, API_TIMEOUT_MS),

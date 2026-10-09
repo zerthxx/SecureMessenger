@@ -399,3 +399,83 @@ mod crash_between_decrypt_and_store {
         assert!(group::pending_decrypted_ids(&b.provider).unwrap().is_empty());
     }
 }
+
+/// Voice clips used to be encrypted as ordinary MLS application messages.
+/// OpenMLS keeps only `out_of_order_tolerance` (5) past keys per sender, so
+/// a clip whose download was delayed past five later messages — or past a
+/// group rebuild, which deletes the group — could never be decrypted again,
+/// and "Tap to retry" could never succeed. Clips are now sealed with their
+/// own random content key (blob.rs), carried inside the MLS-encrypted
+/// envelope, so when they are fetched no longer matters.
+mod voice_blobs {
+    use super::*;
+    use crate::blob;
+
+    #[test]
+    fn the_ratchet_path_loses_a_clip_fetched_after_five_later_messages() {
+        let (a, b) = (Dev::new("ratchet-a"), Dev::new("ratchet-b"));
+        let gid = b"conv-ratchet-blob".to_vec();
+        let rebuilt = a.rebuild(&gid, &[b.key_package()]);
+        b.join(&rebuilt.welcome);
+
+        let clip = a.send(&gid, "audio bytes");
+        let envelope = a.send(&gid, "envelope");
+        assert_eq!(b.read(&gid, &envelope).unwrap(), "envelope");
+        // The download failed; meanwhile the conversation carries on.
+        for i in 0..6 {
+            let text = a.send(&gid, &format!("later {i}"));
+            b.read(&gid, &text).unwrap();
+        }
+        assert!(matches!(b.read(&gid, &clip), Err(MlsCoreError::MessageFromPastEpoch)));
+    }
+
+    #[test]
+    fn a_sealed_clip_opens_whenever_it_is_fetched_even_after_a_rebuild() {
+        let (a, b) = (Dev::new("blob-a"), Dev::new("blob-b"));
+        let gid = b"conv-sealed-blob".to_vec();
+        let rebuilt = a.rebuild(&gid, &[b.key_package()]);
+        b.join(&rebuilt.welcome);
+
+        let key = blob::generate_blob_key();
+        assert_eq!(key.len(), 32);
+        let audio = vec![7u8; 50_000];
+        let sealed = blob::seal_blob(&key, &audio).unwrap();
+        assert_ne!(sealed, audio);
+        assert!(!sealed.windows(64).any(|w| w == &audio[..64]));
+        // The key travels in the envelope, through the MLS message path.
+        let envelope = a.send(&gid, &format!("SMVOICE1:{{\"key\":\"{}\"}}", key.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        assert!(b.read(&gid, &envelope).unwrap().contains("SMVOICE1"));
+
+        for i in 0..20 {
+            b.read(&gid, &a.send(&gid, &format!("later {i}"))).unwrap();
+        }
+        let again = b.rebuild(&gid, &[a.key_package()]);
+        a.join(&again.welcome);
+
+        assert_eq!(blob::open_blob(&key, &sealed).unwrap(), audio);
+        // The same sealed bytes open the same way on any device holding the key.
+        assert_eq!(blob::open_blob(&key, &sealed).unwrap(), audio);
+    }
+
+    #[test]
+    fn a_sealed_clip_rejects_tampering_the_wrong_key_and_garbage() {
+        let key = blob::generate_blob_key();
+        let sealed = blob::seal_blob(&key, b"clip").unwrap();
+
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(matches!(blob::open_blob(&key, &tampered), Err(MlsCoreError::InvalidCiphertext)));
+
+        let other = blob::generate_blob_key();
+        assert_ne!(other, key);
+        assert!(matches!(blob::open_blob(&other, &sealed), Err(MlsCoreError::InvalidCiphertext)));
+
+        assert!(matches!(blob::open_blob(&key, &sealed[..8]), Err(MlsCoreError::InvalidCiphertext)));
+        assert!(matches!(blob::open_blob(&key[..16], &sealed), Err(MlsCoreError::InvalidInput)));
+        assert!(matches!(blob::seal_blob(&[1u8; 5], b"clip"), Err(MlsCoreError::InvalidInput)));
+
+        // A fresh nonce every time: sealing the same clip twice never repeats bytes.
+        assert_ne!(blob::seal_blob(&key, b"clip").unwrap(), sealed);
+    }
+}

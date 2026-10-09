@@ -4,7 +4,7 @@ import websocket from '@fastify/websocket';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import fastify from 'fastify';
 
-import { env, isProduction, trustProxyDisabledBehindProxy, trustProxyOption } from './config/env.js';
+import { env, isProduction, trustProxyDisabledBehindProxy, trustProxyHopCountIgnored, trustProxyOption } from './config/env.js';
 import { db } from './db/client.js';
 import { apkDownloadRoutes } from './http/apkDownload.js';
 import { avatarRoutes } from './http/avatars.js';
@@ -34,6 +34,12 @@ export function buildApp() {
     trustProxy: trustProxyOption,
   });
 
+  if (trustProxyHopCountIgnored) {
+    app.log.warn(
+      'TRUST_PROXY is a hop count, which is no longer honoured (fastify ≥ 5.12 trusts nothing for a numeric value): ' +
+        'proxy trust is OFF. Set TRUST_PROXY to the trusted proxy CIDR(s)/named ranges instead.',
+    );
+  }
   if (trustProxyDisabledBehindProxy) {
     app.log.warn(
       'TRUST_PROXY is disabled in production: request.ip will be the socket peer for every request, ' +

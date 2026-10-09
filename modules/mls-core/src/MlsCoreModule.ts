@@ -35,6 +35,12 @@ declare class MlsCoreModule extends NativeModule<{}> {
   sealCallSignal(groupId: Uint8Array, callId: string, plaintext: string): Promise<Uint8Array>;
   /** Opens call signaling sealed by another group member; rejects anything tampered with or sealed for another call, group, or epoch. */
   openCallSignal(groupId: Uint8Array, callId: string, sealed: Uint8Array): Promise<string>;
+  /** A fresh random 32-byte content key for one media blob (voice clip) — see rust/src/blob.rs. */
+  generateBlobKey(): Promise<Uint8Array>;
+  /** Seals a media blob under a content key (AES-256-GCM, fresh nonce); only the sealed bytes go to the server. */
+  sealBlob(key: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array>;
+  /** Opens a sealed media blob; rejects anything tampered with or sealed under another key, never partial output. */
+  openBlob(key: Uint8Array, sealed: Uint8Array): Promise<Uint8Array>;
 }
 
 export default requireNativeModule<MlsCoreModule>('MlsCore');

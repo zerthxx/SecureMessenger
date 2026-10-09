@@ -14,6 +14,9 @@ import {
   rebuildReason,
   rebuildTargets,
   rebuildWasAccepted,
+  rebuildStillApplies,
+  resolveRebuildCandidate,
+  findPendingSendForRow,
   REBUILD_COOLDOWN_MS,
   sawUnusableGroup,
   signedOutMemberKeys,
@@ -211,5 +214,43 @@ describe('deciding to rebuild the group', () => {
   test('a stale-generation refusal from the server is recognised', () => {
     assert.equal(isStaleGenerationError(new Error('STALE_GROUP_GENERATION')), true);
     assert.equal(isStaleGenerationError(new Error('Too many attempts')), false);
+  });
+});
+
+describe('a rebuild in progress', () => {
+  test('a candidate group is adopted only when the server kept exactly it, built by this device', () => {
+    // The app gave up on (or was killed during) resetGroup after the native
+    // group was already replaced by the candidate for generation 3.
+    const pending = { candidate: 3, localGeneration: 0 };
+    assert.equal(resolveRebuildCandidate({ ...pending, serverGeneration: 3, builtByThisDevice: true }), 'adopt');
+    // Someone else's generation 3, or the server never saw ours: the candidate is garbage.
+    assert.equal(resolveRebuildCandidate({ ...pending, serverGeneration: 3, builtByThisDevice: false }), 'discard');
+    assert.equal(resolveRebuildCandidate({ ...pending, serverGeneration: 2, builtByThisDevice: false }), 'discard');
+    assert.equal(resolveRebuildCandidate({ ...pending, serverGeneration: 4, builtByThisDevice: true }), 'discard');
+    // A Welcome joined meanwhile already replaced the candidate: only the note is stale.
+    assert.equal(resolveRebuildCandidate({ candidate: 3, localGeneration: 3, serverGeneration: 3, builtByThisDevice: false }), 'forget');
+  });
+});
+
+describe('recognising our own send after a lost response', () => {
+  test('a server row with the very bytes a local send sealed is that send', () => {
+    const pending = [
+      { localId: 'local-1', ciphertext: 'AAAA' },
+      { localId: 'local-2', ciphertext: 'BBBB' },
+    ];
+    assert.equal(findPendingSendForRow('BBBB', pending), 'local-2');
+    assert.equal(findPendingSendForRow('CCCC', pending), null);
+    assert.equal(findPendingSendForRow('AAAA', []), null);
+  });
+});
+
+describe('the final sync before a rebuild', () => {
+  test('a rebuild goes ahead only if that sync did not move the device onto another group', () => {
+    // A wiped device (0) or a stale one (2) preparing to rebuild: the sync changed nothing.
+    assert.equal(rebuildStillApplies({ localGenerationBeforeSync: 0, localGenerationAfterSync: 0 }), true);
+    assert.equal(rebuildStillApplies({ localGenerationBeforeSync: 2, localGenerationAfterSync: 2 }), true);
+    // The sync joined someone else's newer Welcome: the prepared rebuild is for a replaced group.
+    assert.equal(rebuildStillApplies({ localGenerationBeforeSync: 0, localGenerationAfterSync: 3 }), false);
+    assert.equal(rebuildStillApplies({ localGenerationBeforeSync: 2, localGenerationAfterSync: 3 }), false);
   });
 });

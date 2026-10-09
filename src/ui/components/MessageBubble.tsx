@@ -148,7 +148,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isOwn, onRet
         <View style={[styles.bubble, styles.failedBubble, { borderColor: theme.colors.border }]}>
           <Ionicons name="lock-closed-outline" size={14} color={theme.colors.textTertiary} style={styles.failedIcon} />
           <AppText variant="body" color="secondary" style={styles.failedText}>
-            Sent before this device joined the chat
+            Not available on this device
           </AppText>
         </View>
       </View>

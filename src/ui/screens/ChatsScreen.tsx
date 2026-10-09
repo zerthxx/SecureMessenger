@@ -1,11 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { FlatList, StyleSheet, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { useFocusEffect, useRouter, type Href } from 'expo-router';
 
 import type { Chat, Conversation } from '@/domain/entities';
 import { useChat } from '@/ui/screens/chat';
 import { useTheme } from '@/ui/theme';
-import { ChatRow, Divider, EmptyState, ErrorState, IconButton, TextField, TopBar } from '@/ui/components';
+import { AppText, ChatRow, Divider, EmptyState, ErrorState, IconButton, TextField, TopBar } from '@/ui/components';
 import { UserAvatar, useOpenUserProfile } from '@/ui/screens/profile';
 
 // See canNavigateRef's doc comment below — 400ms comfortably covers the
@@ -125,7 +125,7 @@ export function ChatsScreen(): React.JSX.Element {
           />
         }
       />
-      {e2eeError ? (
+      {e2eeError && chats.length === 0 ? (
         <ErrorState
           title="Encrypted messaging unavailable"
           message={e2eeError}
@@ -133,6 +133,21 @@ export function ChatsScreen(): React.JSX.Element {
         />
       ) : (
         <>
+          {e2eeError ? (
+            // Setup failed (offline, a server hiccup) but the chats already
+            // on this device are still readable: keep them on screen and
+            // say what is wrong, instead of replacing the whole list.
+            <Pressable
+              onPress={retryingE2ee ? undefined : handleRetryE2eeSetup}
+              accessibilityRole="button"
+              accessibilityLabel={`Encrypted messaging unavailable: ${e2eeError.replace(/[.!]\s*$/, '')}. Tap to retry.`}
+              style={[styles.banner, { backgroundColor: theme.colors.surfaceElevated, borderColor: theme.colors.danger }]}
+            >
+              <AppText variant="caption" color="danger">
+                Encrypted messaging unavailable · {e2eeError} {retryingE2ee ? 'Retrying…' : 'Tap to retry.'}
+              </AppText>
+            </Pressable>
+          ) : null}
           <View style={styles.searchWrap}>
             <TextField placeholder="Search conversations" leadingIcon="search" value={query} onChangeText={setQuery} returnKeyType="search" />
           </View>
@@ -179,6 +194,14 @@ const styles = StyleSheet.create({
   searchWrap: {
     paddingHorizontal: 20,
     paddingBottom: 12,
+  },
+  banner: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
   },
   listContent: {
     paddingBottom: 32,

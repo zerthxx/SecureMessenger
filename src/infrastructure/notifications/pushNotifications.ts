@@ -1,4 +1,4 @@
-import { Linking, Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
 /**
@@ -83,11 +83,22 @@ function conversationIdOf(data: unknown): string | null {
   return typeof id === 'string' ? id : null;
 }
 
+/**
+ * Whether the person is looking at this conversation right now: its screen
+ * is open AND the app is in the foreground. The screen stays mounted while
+ * the app is in the background (home button, another app), and a message
+ * arriving then must still raise a notification — otherwise a chat left
+ * open silently swallowed every notification for it.
+ */
+function isConversationOnScreen(conversationId: string | null): boolean {
+  return conversationId !== null && conversationId === activeConversationId && AppState.currentState === 'active';
+}
+
 /** How notifications (local, or FCM while the app is open) are presented in the foreground. */
 export function configureForegroundPresentation(): void {
   Notifications.setNotificationHandler({
     handleNotification: async (notification) => {
-      const onScreen = conversationIdOf(notification.request.content.data) === activeConversationId && activeConversationId !== null;
+      const onScreen = isConversationOnScreen(conversationIdOf(notification.request.content.data));
       return { shouldShowBanner: !onScreen, shouldShowList: !onScreen, shouldPlaySound: !onScreen, shouldSetBadge: false };
     },
   });
@@ -103,7 +114,7 @@ export async function presentNewMessageNotification({
   title: string;
   body: string;
 }): Promise<void> {
-  if (conversationId === activeConversationId) return;
+  if (isConversationOnScreen(conversationId)) return;
   await Notifications.scheduleNotificationAsync({
     content: { title, body, data: { type: 'new_message', conversationId } },
     trigger: Platform.OS === 'android' ? { channelId: MESSAGES_CHANNEL_ID } : null,

@@ -1,0 +1,52 @@
+{
+  "startedAt": "2026-10-09T09:39:48.282Z",
+  "base": "http://127.0.0.1:4100",
+  "users": 200,
+  "duration": 60,
+  "rate": 6,
+  "registered": 200,
+  "registerErrors": {},
+  "setupErrors": {},
+  "conversations": 100,
+  "sockets": {
+    "opened": 200,
+    "closed": 0,
+    "reconnects": 0,
+    "errors": 0,
+    "openAfterConnect": 200
+  },
+  "sends": {
+    "ok": 1194,
+    "failed": 0,
+    "timeouts": 0,
+    "errors": {},
+    "p50": 25,
+    "p95": 230,
+    "p99": 315,
+    "max": 495,
+    "perSecond": 17.1
+  },
+  "hints": {
+    "expected": 1194,
+    "received": 1194,
+    "p50": 26,
+    "p95": 231,
+    "p99": 317,
+    "max": 498
+  },
+  "fetch": {
+    "calls": 1394,
+    "errors": {},
+    "rows": 2388,
+    "duplicates": 0,
+    "outOfOrder": 4,
+    "missing": 0,
+    "p50": 3,
+    "p95": 6,
+    "p99": 8,
+    "max": 615
+  },
+  "registerSeconds": 6.116,
+  "setupSeconds": 3.887,
+  "trafficSeconds": 69.931
+}

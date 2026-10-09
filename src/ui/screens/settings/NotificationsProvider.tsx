@@ -22,6 +22,8 @@ import { getAppState, initMessageStore, setAppState } from '@/infrastructure/sto
 import { useAuth } from '@/ui/screens/auth/AuthContext';
 
 const ENABLED_KEY = 'push_notifications_enabled';
+/** Set once the system permission prompt has been shown by the app itself (see the sign-in effect below). */
+const PROMPTED_KEY = 'push_notifications_prompted';
 
 export type PushDelivery =
   | { state: 'off' }
@@ -78,6 +80,24 @@ export function NotificationsProvider({ children }: PropsWithChildren): React.JS
   }, [refreshPermission]);
 
   const active = enabled && permission === 'granted';
+
+  // Android 13+ only shows notifications once the person has allowed them,
+  // and the app used to ask only from Settings → Notifications — so a new
+  // account got no message notifications at all until it found that
+  // screen. Ask once, right after sign-in, while the preference is on and
+  // the system hasn't been asked yet; never again after an answer, and
+  // never when the person turned notifications off in the app.
+  // `denied` here means "not granted but the system can still ask" (that is
+  // what a fresh install reports on some Android versions); `blocked` means
+  // it can't, and is left to Settings → Notifications.
+  useEffect(() => {
+    if (!signedIn || !enabled || (permission !== 'undetermined' && permission !== 'denied')) return;
+    if (getAppState(PROMPTED_KEY) === '1') return;
+    setAppState(PROMPTED_KEY, '1');
+    requestNotificationPermission()
+      .then(setPermission)
+      .catch(() => {});
+  }, [signedIn, enabled, permission]);
 
   // Register this install's push token for the signed-in account while notifications are on.
   useEffect(() => {

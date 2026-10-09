@@ -58,6 +58,15 @@ class MlsCoreModule extends NativeModule<{}> {
   openCallSignal(): Promise<never> {
     throw new Error('MlsCore is not supported on web.');
   }
+  generateBlobKey(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  sealBlob(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
+  openBlob(): Promise<never> {
+    throw new Error('MlsCore is not supported on web.');
+  }
 }
 
 export default registerWebModule(MlsCoreModule, 'MlsCoreModule');

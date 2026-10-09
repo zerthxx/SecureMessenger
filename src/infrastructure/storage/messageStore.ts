@@ -92,6 +92,13 @@ export interface MessageRow {
   audioDurationMs: number | null;
   audioLocalUri: string | null;
   audioState: AudioState | null;
+  /**
+   * The clip's content key (base64, 32 bytes) — what its blob on the server
+   * is sealed under (see rust/src/blob.rs). Null for clips from app
+   * versions before content keys, which were MLS application messages.
+   * Message content, cached here like the plaintext it travelled with.
+   */
+  audioKey: string | null;
   createdAt: string;
   localCreatedAt: string;
 }
@@ -161,6 +168,7 @@ export function initMessageStore(): void {
   ensureColumn(database, 'messages', 'audio_duration_ms', 'INTEGER');
   ensureColumn(database, 'messages', 'audio_local_uri', 'TEXT');
   ensureColumn(database, 'messages', 'audio_state', 'TEXT');
+  ensureColumn(database, 'messages', 'audio_key', 'TEXT');
 }
 
 // Set by ChatContext whenever the authenticated account changes (login,
@@ -239,6 +247,7 @@ function rowToMessage(row: {
   audio_duration_ms: number | null;
   audio_local_uri: string | null;
   audio_state: string | null;
+  audio_key: string | null;
   created_at: string;
   local_created_at: string;
 }): MessageRow {
@@ -254,6 +263,7 @@ function rowToMessage(row: {
     audioDurationMs: row.audio_duration_ms,
     audioLocalUri: row.audio_local_uri,
     audioState: row.audio_state as AudioState | null,
+    audioKey: row.audio_key ?? null,
     createdAt: row.created_at,
     localCreatedAt: row.local_created_at,
   };
@@ -340,14 +350,15 @@ export function recordMessage(
     audioDurationMs?: number | null;
     audioLocalUri?: string | null;
     audioState?: AudioState | null;
+    audioKey?: string | null;
     createdAt: string;
     localCreatedAt: string;
   },
 ): void {
   assertOwnerUnchanged(owner);
   getDb().runSync(
-    `INSERT INTO messages (id, conversation_id, sender_device_id, direction, status, kind, plaintext, audio_media_id, audio_duration_ms, audio_local_uri, audio_state, created_at, local_created_at, owner_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO messages (id, conversation_id, sender_device_id, direction, status, kind, plaintext, audio_media_id, audio_duration_ms, audio_local_uri, audio_state, audio_key, created_at, local_created_at, owner_user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        created_at = excluded.created_at,
        status = CASE WHEN messages.status = 'decrypted' THEN messages.status ELSE excluded.status END,
@@ -357,6 +368,7 @@ export function recordMessage(
        audio_duration_ms = CASE WHEN messages.audio_duration_ms IS NOT NULL THEN messages.audio_duration_ms ELSE excluded.audio_duration_ms END,
        audio_local_uri = CASE WHEN messages.audio_local_uri IS NOT NULL THEN messages.audio_local_uri ELSE excluded.audio_local_uri END,
        audio_state = CASE WHEN messages.audio_state = 'downloaded' THEN messages.audio_state ELSE excluded.audio_state END,
+       audio_key = CASE WHEN messages.audio_key IS NOT NULL THEN messages.audio_key ELSE excluded.audio_key END,
        owner_user_id = excluded.owner_user_id`,
     [
       input.id,
@@ -370,6 +382,7 @@ export function recordMessage(
       input.audioDurationMs ?? null,
       input.audioLocalUri ?? null,
       input.audioState ?? null,
+      input.audioKey ?? null,
       input.createdAt,
       input.localCreatedAt,
       owner,
@@ -411,11 +424,25 @@ export function updateVoiceAudio(
  * with it — our own just-sent plaintext is always the authoritative
  * content for a message we authored, overriding any placeholder a race
  * created.
+ *
+ * Idempotent: a send confirmed twice — once by the sync recognising its
+ * ciphertext on the server (see ChatContext.syncConversation), once by the
+ * send's own late response — must not delete what the first confirmation
+ * produced. If no row holds `localId` any more, only the status of the row
+ * under `serverId` is settled.
  */
 export function reconcileSentMessageId(owner: string, localId: string, serverId: string, createdAt: string): void {
   assertOwnerUnchanged(owner);
   const database = getDb();
   database.withTransactionSync(() => {
+    const local = database.getFirstSync<{ id: string }>(`SELECT id FROM messages WHERE id = ? AND owner_user_id = ?`, [localId, owner]);
+    if (!local) {
+      database.runSync(`UPDATE messages SET status = 'sent' WHERE id = ? AND owner_user_id = ? AND status IN ('sending', 'failed')`, [
+        serverId,
+        owner,
+      ]);
+      return;
+    }
     if (localId !== serverId) {
       database.runSync(`DELETE FROM messages WHERE id = ? AND owner_user_id = ?`, [serverId, owner]);
     }
@@ -433,10 +460,42 @@ export function updateMessageStatus(owner: string, id: string, status: MessageSt
   getDb().runSync(`UPDATE messages SET status = ? WHERE id = ? AND owner_user_id = ?`, [status, id, owner]);
 }
 
-/** Stamps the server-issued media id onto a voice message once its blob upload confirms — see ChatContext's `attemptSendVoice`. */
-export function setVoiceMediaId(owner: string, id: string, mediaId: string | null): void {
+/**
+ * Records a voice message's blob as it is prepared for sending — its content
+ * key once generated, its server media id once the upload confirms — so a
+ * retry reuses both instead of sealing and uploading again. See
+ * ChatContext's `attemptSendVoice`.
+ */
+export function setVoiceBlob(owner: string, id: string, input: { mediaId?: string | null; key?: string | null }): void {
   assertOwnerUnchanged(owner);
-  getDb().runSync(`UPDATE messages SET audio_media_id = ? WHERE id = ? AND owner_user_id = ?`, [mediaId, id, owner]);
+  const sets: string[] = [];
+  const params: (string | null)[] = [];
+  if (input.mediaId !== undefined) {
+    sets.push('audio_media_id = ?');
+    params.push(input.mediaId);
+  }
+  if (input.key !== undefined) {
+    sets.push('audio_key = ?');
+    params.push(input.key);
+  }
+  if (sets.length === 0) return;
+  getDb().runSync(`UPDATE messages SET ${sets.join(', ')} WHERE id = ? AND owner_user_id = ?`, [...params, id, owner]);
+}
+
+/**
+ * This account's sends in a conversation that have not been confirmed by the
+ * server yet (still under their local ids): what a sync compares against
+ * rows this device sent, so a send whose response was lost is recognised
+ * instead of being stored a second time. Oldest first.
+ */
+export function listPendingOutgoingIds(owner: string, conversationId: string): string[] {
+  return getDb()
+    .getAllSync<{ id: string }>(
+      `SELECT id FROM messages WHERE conversation_id = ? AND owner_user_id = ? AND direction = 'outgoing' AND status IN ('sending', 'failed')
+       ORDER BY local_created_at, created_at`,
+      [conversationId, owner],
+    )
+    .map((row) => row.id);
 }
 
 export function getMessageById(owner: string, id: string): MessageRow | null {
@@ -559,20 +618,20 @@ export function refreshConversationPreview(owner: string, conversationId: string
   if (!latest) return;
   assertOwnerUnchanged(owner);
   const isVoice = latest.kind === 'voice';
+  // A sent (or still sending) text is this account's own plaintext, as safe
+  // to preview as a decrypted one; it used to show as a bare "Message".
   const preview =
     latest.status === 'decryption_failed'
       ? 'Unable to decrypt this message'
       : latest.status === 'unavailable'
         ? 'Message not available on this device'
-      : latest.status === 'failed'
-        ? isVoice
-          ? 'Voice message failed to send'
-          : 'Message failed to send'
-        : isVoice
-          ? '🎤 Voice message'
-          : latest.status === 'decrypted'
-            ? latest.plaintext
-            : 'Message';
+        : latest.status === 'failed'
+          ? isVoice
+            ? 'Voice message failed to send'
+            : 'Message failed to send'
+          : isVoice
+            ? '🎤 Voice message'
+            : latest.plaintext ?? 'Message';
   getDb().runSync(`UPDATE conversations SET last_message_preview = ?, last_message_at = ? WHERE id = ? AND owner_user_id = ?`, [
     preview,
     latest.created_at,
@@ -605,6 +664,30 @@ export function setLocalGroupGeneration(owner: string, conversationId: string, g
       owner,
     ]);
   });
+}
+
+/**
+ * The generation of a group this account's device built but has not seen
+ * the server accept (see ChatContext.rebuildConversationGroup and
+ * groupSync.resolveRebuildCandidate). Set before the native rebuild
+ * replaces the local group, cleared once the server has answered. While
+ * it is set the local generation is 0: nothing is encrypted or decrypted
+ * with a group the server may never have accepted.
+ */
+export function getRebuildCandidate(owner: string, conversationId: string): number | null {
+  const stored = getAppState(`rebuildCandidate:${owner}:${conversationId}`);
+  if (stored === null) return null;
+  const generation = Number(stored);
+  return Number.isInteger(generation) && generation > 0 ? generation : null;
+}
+
+export function setRebuildCandidate(owner: string, conversationId: string, generation: number): void {
+  assertOwnerUnchanged(owner);
+  setAppState(`rebuildCandidate:${owner}:${conversationId}`, String(generation));
+}
+
+export function clearRebuildCandidate(owner: string, conversationId: string): void {
+  deleteAppState(`rebuildCandidate:${owner}:${conversationId}`);
 }
 
 export function getAppState(key: string): string | null {

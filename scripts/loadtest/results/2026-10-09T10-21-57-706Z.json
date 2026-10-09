@@ -1,0 +1,55 @@
+{
+  "startedAt": "2026-10-09T10:21:57.706Z",
+  "base": "http://127.0.0.1:4200",
+  "users": 60,
+  "duration": 120,
+  "rate": 6,
+  "registered": 60,
+  "registerErrors": {},
+  "setupErrors": {},
+  "conversations": 30,
+  "sockets": {
+    "opened": 60,
+    "closed": 0,
+    "reconnects": 0,
+    "errors": 0,
+    "openAfterConnect": 60
+  },
+  "sends": {
+    "ok": 610,
+    "failed": 90,
+    "timeouts": 0,
+    "errors": {
+      "500 Failed query: select \"devices\".\"revoked_at\", \"conversation_members\".\"user_id": 35,
+      "500 Failed query: select \"devices\".\"user_id\", \"devices\".\"revoked_at\", \"devices\".": 55
+    },
+    "p50": 315,
+    "p95": 484,
+    "p99": 952,
+    "max": 986,
+    "perSecond": 4.7
+  },
+  "hints": {
+    "expected": 700,
+    "received": 610,
+    "p50": 480,
+    "p95": 20808,
+    "p99": 21136,
+    "max": 21313
+  },
+  "fetch": {
+    "calls": 680,
+    "errors": {},
+    "rows": 1220,
+    "duplicates": 0,
+    "outOfOrder": 0,
+    "missing": 0,
+    "p50": 314,
+    "p95": 544,
+    "p99": 626,
+    "max": 940
+  },
+  "registerSeconds": 4.869,
+  "setupSeconds": 12.431,
+  "trafficSeconds": 130.151
+}

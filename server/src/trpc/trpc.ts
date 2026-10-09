@@ -1,6 +1,8 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 
-import { isProduction } from '../config/env.js';
+import { isProduction, shedWaitingThreshold } from '../config/env.js';
+import { poolStats } from '../db/client.js';
+import { shedIfOverloaded } from '../lib/overload.js';
 import { checkRateLimit, RateLimitExceededError } from '../lib/rateLimit.js';
 import { SESSION_TERMINATED_MESSAGE } from '../lib/sessions.js';
 import type { Context } from './context.js';
@@ -36,7 +38,7 @@ export const createCallerFactory = t.createCallerFactory;
  * everywhere, or for inactivity (lib/sessions.ts). Also records the session
  * as active (throttled).
  */
-export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
+const requireActiveSession = t.middleware(async ({ ctx, next }) => {
   if (!ctx.user || !ctx.device) {
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Authentication required' });
   }
@@ -47,6 +49,8 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user, device: ctx.device } });
 });
 
+export const protectedProcedure = t.procedure.use(requireActiveSession);
+
 /**
  * Called directly at the top of a resolver (not `.use()` middleware) so
  * `input` is already parsed and typed by the time it's checked — no
@@ -54,6 +58,26 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
  * Throws TOO_MANY_REQUESTS; each call is one independent bucket, so a
  * procedure needing both an IP and a username limit calls this twice.
  */
+/**
+ * For procedures the app calls on a schedule (chat list, message fetch, key
+ * package status): refused with TOO_MANY_REQUESTS + Retry-After while the
+ * database pool's wait queue is deeper than `shedWaitingThreshold`, BEFORE
+ * the session check, so a shed call costs no database work at all. Never
+ * used for sends, auth, session changes or anything the person is waiting
+ * on — see lib/overload.ts for the reasoning and the measurements.
+ */
+export const sheddableProcedure = t.procedure
+  .use(async ({ ctx, next }) => {
+    shedIfOverloaded(
+      poolStats,
+      shedWaitingThreshold,
+      (seconds) => ctx.res.header('Retry-After', String(seconds)),
+      (pressure, retryAfter) => ctx.log.warn({ pool: pressure, retryAfter }, 'overloaded: polling request shed'),
+    );
+    return next();
+  })
+  .use(requireActiveSession);
+
 export function enforceRateLimit(key: string, max: number, windowMs: number): void {
   try {
     checkRateLimit(key, max, windowMs);
